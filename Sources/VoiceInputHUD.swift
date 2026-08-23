@@ -156,7 +156,7 @@ final class VoiceInputHUDManager {
     /// 窗口固定尺寸（与视图外层 frame 一致）：收缩动画发生在窗口内部，
     /// 窗口本身不做 setFrame 跳变（否则与 SwiftUI 动画不同步，视觉错位）。
     /// 高度 = 胶囊 46 + 上方替换提示条区 32；胶囊始终贴底，位置与旧版一致
-    private static let windowSize = NSSize(width: 148, height: 72)
+    private static let windowSize = NSSize(width: 136, height: 72)
     /// 胶囊本体高度（视图布局用）
     static let capsuleHeight: CGFloat = 40
 
@@ -194,7 +194,7 @@ struct VoiceInputCapsuleView: View {
     let manager: VoiceInputHUDManager
     @State private var isVoiceActive = false
 
-    static let windowWidth: CGFloat = 148
+    static let windowWidth: CGFloat = 136
     /// 窗口总高：胶囊 40 + 上方提示区 32（胶囊贴底）
     static let windowHeight: CGFloat = 72
 
@@ -249,13 +249,15 @@ struct VoiceInputCapsuleView: View {
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
 
+                Spacer(minLength: 6)
+
                 Divider()
                     .frame(height: 11)
                     .overlay(Color.white.opacity(0.24))
 
                 statusView
             }
-            .padding(.horizontal, 14)
+            .padding(.horizontal, 13)
         }
         .frame(width: Self.windowWidth, height: 40) // 胶囊固定尺寸：约束识别中进度条（GeometryReader）不撑满窗口
         .background(Color.black.opacity(0.82))
