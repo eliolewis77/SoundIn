@@ -256,9 +256,8 @@ struct VoiceInputCapsuleView: View {
                 statusView
             }
             .padding(.horizontal, 16)
-            .frame(height: 46)
-            .transition(.opacity)
         }
+        .frame(width: Self.windowWidth, height: 46) // 胶囊固定尺寸：约束识别中进度条（GeometryReader）不撑满窗口
         .background(Color.black.opacity(0.82))
         .clipShape(RoundedRectangle(cornerRadius: 23, style: .continuous))
         .animation(.easeOut(duration: 0.12), value: phaseIdentity)
