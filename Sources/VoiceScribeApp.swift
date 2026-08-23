@@ -491,10 +491,7 @@ private struct SettingsView: View {
                         profilePendingDelete = profileStore.selectedEngine
                     }
                     .disabled(profileStore.profiles.count <= 1)
-                    connectionTestButton(
-                        isRunning: isTestingEngineConnection,
-                        result: engineConnectionTest
-                    ) {
+                    connectionTestButton(isRunning: isTestingEngineConnection) {
                         isTestingEngineConnection = true
                         engineConnectionTest = nil
                         let base = speech.speechAPIBaseURL
@@ -505,6 +502,7 @@ private struct SettingsView: View {
                         isTestingEngineConnection = false
                     }
                 }
+                connectionTestResult(engineConnectionTest)
                 Text("下方字段即当前选中的配置，直接修改会保存回该配置档。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -512,18 +510,20 @@ private struct SettingsView: View {
         }
     }
 
-    /// 「测试连接」按钮 + 就地结果显示
-    @ViewBuilder
+    /// 「测试连接」按钮（结果由 connectionTestResult 单独渲染在按钮行下方）
     private func connectionTestButton(
         isRunning: Bool,
-        result: SpeechManager.ConnectionTestResult?,
         action: @escaping () async -> Void
     ) -> some View {
         Button(isRunning ? "测试中…" : "测试连接") {
             Task { await action() }
         }
         .disabled(isRunning)
+    }
 
+    /// 连接测试结果：独立一行显示在按钮行下方，避免挤在按钮右侧
+    @ViewBuilder
+    private func connectionTestResult(_ result: SpeechManager.ConnectionTestResult?) -> some View {
         if let result {
             Label(result.displayText, systemImage: result.isSuccess ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .font(.footnote)
@@ -571,10 +571,7 @@ private struct SettingsView: View {
                         profilePendingDelete = profileStore.selectedPolish
                     }
                     .disabled(profileStore.profiles.count <= 1)
-                    connectionTestButton(
-                        isRunning: isTestingPolishConnection,
-                        result: polishConnectionTest
-                    ) {
+                    connectionTestButton(isRunning: isTestingPolishConnection) {
                         isTestingPolishConnection = true
                         polishConnectionTest = nil
                         let base = speech.polishAPIBaseURL
@@ -585,6 +582,7 @@ private struct SettingsView: View {
                         isTestingPolishConnection = false
                     }
                 }
+                connectionTestResult(polishConnectionTest)
             }
 
             Section("优化指令（Prompt）") {
