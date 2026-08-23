@@ -230,6 +230,8 @@ private struct SettingsView: View {
                 ForEach(HotkeyInputManager.TriggerMode.allCases, id: \.self) { mode in
                     Text(mode.displayName).tag(mode)
                 }
+            }
+
             if triggerMode == .hold {
                 Picker("确认等待", selection: Binding(
                     get: { holdThreshold },
@@ -243,18 +245,6 @@ private struct SettingsView: View {
                     Text("1.0 秒").tag(1.0)
                 }
             }
-
-            Toggle("录音时实时预览转写", isOn: Binding(
-                get: { speech.livePreviewEnabled },
-                set: { speech.livePreviewEnabled = $0 }
-            ))
-
-            if speech.livePreviewEnabled {
-                Text("说话时胶囊中实时显示已识别的文字（原始转写，未润色）。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
-            }
-        }
         }
 
         Section {

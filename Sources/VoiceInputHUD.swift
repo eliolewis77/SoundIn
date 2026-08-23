@@ -156,7 +156,7 @@ final class VoiceInputHUDManager {
     /// 窗口固定尺寸（与视图外层 frame 一致）：收缩动画发生在窗口内部，
     /// 窗口本身不做 setFrame 跳变（否则与 SwiftUI 动画不同步，视觉错位）。
     /// 高度 = 胶囊 46 + 上方替换提示条区 32；胶囊始终贴底，位置与旧版一致
-    private static let windowSize = NSSize(width: 280, height: 72)
+    private static let windowSize = NSSize(width: 136, height: 72)
     /// 胶囊本体高度（视图布局用）
     static let capsuleHeight: CGFloat = 40
 
@@ -194,14 +194,9 @@ struct VoiceInputCapsuleView: View {
     let manager: VoiceInputHUDManager
     @State private var isVoiceActive = false
 
-    static let windowWidth: CGFloat = 280
+    static let windowWidth: CGFloat = 136
     /// 窗口总高：胶囊 40 + 上方提示区 32（胶囊贴底）
     static let windowHeight: CGFloat = 72
-
-    /// 胶囊基础宽度（无实时预览时）
-    static let baseCapsuleWidth: CGFloat = 136
-    /// 实时预览时胶囊最大宽度
-    static let maxCapsuleWidth: CGFloat = 264
 
     var body: some View {
         VStack(spacing: 7) {
@@ -248,7 +243,7 @@ struct VoiceInputCapsuleView: View {
             }
 
             HStack(spacing: 8) {
-                Text(displayedTitle)
+                Text(hudTitle)
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
@@ -265,10 +260,9 @@ struct VoiceInputCapsuleView: View {
             .padding(.leading, 15)
             .padding(.trailing, 13)
         }
-        .frame(width: capsuleWidth, height: 40) // 胶囊固定高度：约束识别中进度条（GeometryReader）不撑满窗口
+        .frame(width: Self.windowWidth, height: 40) // 胶囊固定尺寸：约束识别中进度条（GeometryReader）不撑满窗口
         .background(Color.black.opacity(0.82))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
-        .animation(.easeOut(duration: 0.15), value: capsuleWidth)
         .animation(.easeOut(duration: 0.12), value: phaseIdentity)
         .animation(.linear(duration: 0.12), value: manager.progress)
         .onChange(of: manager.audioLevelProxy) { _, level in
@@ -277,37 +271,6 @@ struct VoiceInputCapsuleView: View {
     }
 
     private var hudTitle: String { manager.message }
-
-    // MARK: - 实时预览（方案 A：标题区动态替换为转写文本，胶囊随内容加宽）
-
-    /// 录音中 + 开关打开 + 已有文本时进入预览态
-    private var showsLivePreview: Bool {
-        guard case .recording = manager.phase else { return false }
-        return manager.livePreviewEnabledProxy && !manager.livePreviewProxy.isEmpty
-    }
-
-    /// 预览标题：不加快捷省略号，超宽时只保留尾部（partial 会回头改前面的字，看尾部最有意义）
-    private var displayedTitle: String {
-        guard showsLivePreview else { return hudTitle }
-        let text = manager.livePreviewProxy.trimmingCharacters(in: .whitespaces)
-        let maxWidth = Self.maxCapsuleWidth - Self.baseCapsuleWidth + 40   // 标题区可用宽度
-        let font = NSFont.boldSystemFont(ofSize: 12)
-        var tail = text
-        while tail.count > 1,
-              (tail as NSString).size(withAttributes: [.font: font]).width > maxWidth {
-            tail = String(tail.dropFirst()).trimmingCharacters(in: .whitespaces)
-        }
-        return tail
-    }
-
-    /// 胶囊宽度：预览时随文本测量值伸展（136 → 264），其余状态保持基础宽度
-    private var capsuleWidth: CGFloat {
-        guard showsLivePreview else { return Self.baseCapsuleWidth }
-        let font = NSFont.boldSystemFont(ofSize: 12)
-        let textWidth = (displayedTitle as NSString).size(withAttributes: [.font: font]).width
-        let chrome: CGFloat = 15 + 13 + 6 + 8 + 1 + 8 + 24 + 13   // padding + spacing + divider + 波形区
-        return min(Self.maxCapsuleWidth, max(Self.baseCapsuleWidth, textWidth + chrome))
-    }
 
     @ViewBuilder
     private var statusView: some View {
@@ -387,20 +350,10 @@ struct VoiceInputCapsuleView: View {
     }
 }
 
-// MARK: - SpeechManager 桥接（音频电平 / 实时预览）
+// MARK: - SpeechManager 音频电平桥接
 extension VoiceInputHUDManager {
     /// HUD 波形使用的实时音频电平（直接读 SpeechManager 的 @Observable 属性）
     var audioLevelProxy: CGFloat {
         SpeechManager.shared.audioLevel
-    }
-
-    /// 实时预览文本（录音中由识别回调持续更新）
-    var livePreviewProxy: String {
-        SpeechManager.shared.livePreviewText
-    }
-
-    /// 实时预览开关
-    var livePreviewEnabledProxy: Bool {
-        SpeechManager.shared.livePreviewEnabled
     }
 }

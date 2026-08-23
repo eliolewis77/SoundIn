@@ -594,22 +594,6 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
     var errorMessage: String?
     var lastPermissionError: VoiceInputPhase = .idle
 
-    /// 录音时是否在胶囊中实时预览转写（独立开关，默认关）
-    var livePreviewEnabled: Bool = UserDefaults.standard.bool(forKey: "livePreviewEnabled") {
-        didSet {
-            UserDefaults.standard.set(livePreviewEnabled, forKey: "livePreviewEnabled")
-        }
-    }
-    /// 实时预览文本：本机引擎=最新 partial；API 引擎=已完成段的合并结果。录音结束后清空。
-    private(set) var livePreviewText = ""
-    /// API 分段模式下各段已出的转写结果（按段号合并）
-    private var livePreviewSegments: [Int: String] = [:]
-
-    private func updateLivePreview(_ text: String) {
-        guard livePreviewEnabled, isRecording else { return }
-        livePreviewText = text
-    }
-
     /// 录音无法启动时的具体原因（nil = 可以启动）。供热键路径与 HUD 显示，
     /// 避免 canStartRecording 为 false 时静默失败。
     var permissionBlockedReason: String? {
@@ -899,8 +883,6 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
     func resetSession() {
         currentSessionID = nil
         transcribedText = ""
-        livePreviewText = ""
-        livePreviewSegments.removeAll()
         audioLevel = 0.0
         recordedAudioURL = nil
         useSegmentedAPIRecording = false
@@ -969,8 +951,6 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         }
 
         transcribedText = ""
-        livePreviewText = ""
-        livePreviewSegments.removeAll()
         audioLevel = 0.0
         errorMessage = nil
         speechRecognizer = nil
@@ -1102,7 +1082,6 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             var isFinal = false
             if let result {
                 self.transcribedText = result.bestTranscription.formattedString
-                self.updateLivePreview(self.transcribedText)
                 self.lastTranscriptionUpdate = Date()
                 isFinal = result.isFinal
             }
@@ -1219,17 +1198,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
 
         completedSpeechSegments.append(segment)
         segmentTranscriptionTasks[segment.index] = Task { [weak self] in
-            let text = await self?.transcribeSegment(segment, endpointURL: endpointURL, apiKey: apiKey, modelName: modelName)
-            // 实时预览：段级结果出来立即并入预览文本
-            if let self, let text, !text.isEmpty {
-                self.livePreviewSegments[segment.index] = text
-                let merged = self.livePreviewSegments
-                    .sorted { $0.key < $1.key }
-                    .map(\.value)
-                    .reduce("") { self.mergeAdjacentTranscription($0, $1) }
-                self.updateLivePreview(merged)
-            }
-            return text
+            await self?.transcribeSegment(segment, endpointURL: endpointURL, apiKey: apiKey, modelName: modelName)
         }
     }
 
