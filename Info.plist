@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key>
+    <string>zh-Hans</string>
+    <key>CFBundleExecutable</key>
+    <string>VoiceScribe</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.codespace.voicescribe</string>
+    <key>CFBundleName</key>
+    <string>SoundIn</string>
+    <key>CFBundleDisplayName</key>
+    <string>SoundIn 声入</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundleVersion</key>
+    <string>1</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>15.0</string>
+    <key>NSMicrophoneUsageDescription</key>
+    <string>SoundIn（声入）需要访问麦克风来录制并转写您的语音。</string>
+    <key>NSSpeechRecognitionUsageDescription</key>
+    <string>SoundIn（声入）使用语音识别技术将您的语音转换为文字。</string>
+</dict>
+</plist>

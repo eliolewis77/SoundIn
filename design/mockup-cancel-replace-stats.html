@@ -1,0 +1,246 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SoundIn · 取消录音 / 替换选中 / 听写统计 设计稿</title>
+<style>
+  :root {
+    --bg: #f5f4f1;
+    --card: #ffffff;
+    --ink: #2c2c2a;
+    --sub: #8a8a86;
+    --green: #97c459;
+    --green-deep: #7ba644;
+    --red: #e0654f;
+    --line: #e8e6e0;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    background: var(--bg);
+    color: var(--ink);
+    padding: 48px 24px 80px;
+  }
+  .wrap { max-width: 760px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 600; margin-bottom: 6px; }
+  .lead { color: var(--sub); font-size: 14px; margin-bottom: 40px; line-height: 1.7; }
+  section { margin-bottom: 48px; }
+  h2 {
+    font-size: 15px; font-weight: 600;
+    display: flex; align-items: center; gap: 8px;
+    margin-bottom: 16px;
+  }
+  h2 .num {
+    width: 20px; height: 20px; border-radius: 6px;
+    background: var(--green); color: #fff;
+    font-size: 12px; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .card {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; padding: 28px;
+  }
+  .stage {
+    background: linear-gradient(160deg, #3a3f45 0%, #23272c 100%);
+    border-radius: 10px;
+    height: 150px;
+    position: relative;
+    display: flex; flex-direction: column;
+    align-items: center; justify-content: flex-end;
+    padding-bottom: 18px;
+    overflow: hidden;
+  }
+  .stage .hint-top {
+    position: absolute; top: 12px; left: 14px; right: 14px;
+    color: rgba(255,255,255,.45); font-size: 11px;
+  }
+  /* ── 胶囊 HUD ── */
+  .capsule {
+    background: rgba(28,28,30,.92);
+    backdrop-filter: blur(10px);
+    border-radius: 999px;
+    height: 46px;
+    display: flex; align-items: center;
+    padding: 0 18px;
+    gap: 10px;
+    color: #fff;
+    font-size: 13px;
+    box-shadow: 0 6px 24px rgba(0,0,0,.35);
+  }
+  .bars { display: flex; align-items: center; gap: 3px; }
+  .bar { width: 3px; border-radius: 2px; background: #fff; }
+  .bar:nth-child(1) { height: 10px; opacity: 1; }
+  .bar:nth-child(2) { height: 16px; opacity: .8; }
+  .bar:nth-child(3) { height: 22px; opacity: .55; }
+  .block { width: 5px; height: 21px; border-radius: 3px; background: var(--green); }
+  .cursor { width: 2.5px; height: 21px; border-radius: 2px; background: #fff; }
+  .prog-track {
+    width: 64px; height: 5px; border-radius: 3px;
+    background: rgba(255,255,255,.18); overflow: hidden;
+  }
+  .prog-fill { width: 42%; height: 100%; background: var(--green); border-radius: 3px; }
+  .pct { font-variant-numeric: tabular-nums; opacity: .85; font-size: 12px; }
+  .esc-key {
+    font-size: 11px; color: rgba(255,255,255,.75);
+    border: 1px solid rgba(255,255,255,.35);
+    border-radius: 5px; padding: 2px 7px;
+    letter-spacing: .05em;
+  }
+  .capsule.cancelled { gap: 8px; }
+  .x-icon {
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--red); color: #fff;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 12px; font-weight: 700;
+  }
+  /* 替换提示条 */
+  .replace-tip {
+    position: absolute; bottom: 76px;
+    background: rgba(151,196,89,.95);
+    color: #fff; font-size: 12px; font-weight: 500;
+    border-radius: 8px; padding: 5px 12px;
+    box-shadow: 0 4px 14px rgba(0,0,0,.25);
+  }
+  .replace-tip::after {
+    content: ""; position: absolute; left: 50%; bottom: -5px;
+    transform: translateX(-50%);
+    border-left: 5px solid transparent;
+    border-right: 5px solid transparent;
+    border-top: 5px solid rgba(151,196,89,.95);
+  }
+  .row { display: flex; gap: 20px; }
+  .col { flex: 1; min-width: 0; }
+  .cap { text-align: center; color: var(--sub); font-size: 12px; margin-top: 12px; line-height: 1.6; }
+  /* 说明列表 */
+  ul.spec { list-style: none; margin-top: 18px; }
+  ul.spec li {
+    font-size: 13.5px; line-height: 1.8; padding-left: 18px;
+    position: relative; color: var(--ink);
+  }
+  ul.spec li::before {
+    content: ""; position: absolute; left: 2px; top: 11px;
+    width: 6px; height: 6px; border-radius: 50%; background: var(--green);
+  }
+  ul.spec li b { font-weight: 600; }
+  kbd {
+    font-family: ui-monospace, monospace; font-size: 12px;
+    background: #efeeea; border: 1px solid #dddad2;
+    border-bottom-width: 2px; border-radius: 5px;
+    padding: 1px 6px;
+  }
+  /* 设置页示意 */
+  .settings {
+    border: 1px solid var(--line); border-radius: 10px;
+    overflow: hidden; font-size: 13.5px;
+  }
+  .s-row {
+    display: flex; justify-content: space-between; align-items: center;
+    padding: 11px 16px;
+    border-bottom: 1px solid var(--line);
+  }
+  .s-row:last-child { border-bottom: none; }
+  .s-row .label { font-weight: 500; }
+  .s-row .value { color: var(--sub); }
+  .s-row.hl { background: #f4faec; }
+  .s-row.hl .value { color: var(--green-deep); font-weight: 600; }
+  .footer-note {
+    padding: 10px 16px; font-size: 12px; color: var(--sub);
+    background: #fafaf8; border-top: 1px dashed var(--line); line-height: 1.7;
+  }
+  .tag {
+    display: inline-block; font-size: 11px; color: var(--green-deep);
+    background: #eef5e2; border-radius: 5px; padding: 1px 8px;
+    margin-left: 8px; vertical-align: 1px;
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SoundIn · 三项新功能设计稿</h1>
+  <p class="lead">取消录音 / 替换选中内容 / 每日听写统计。以下为交互与界面示意，确认后再进入开发。</p>
+
+  <!-- ═══ ① 取消录音 ═══ -->
+  <section>
+    <h2><span class="num">1</span>取消录音</h2>
+    <div class="card">
+      <div class="row">
+        <div class="col">
+          <div class="stage">
+            <div class="hint-top">录音中（进度条正常走）</div>
+            <div class="capsule">
+              <span class="bars"><span class="bar"></span><span class="bar"></span><span class="bar"></span></span>
+              <span>识别中</span>
+              <span class="prog-track"><span class="prog-fill"></span></span>
+              <span class="pct">42%</span>
+              <span style="flex:1"></span>
+              <span class="esc-key">ESC 取消</span>
+            </div>
+          </div>
+          <div class="cap">录音期间胶囊右侧常驻 <b>ESC 取消</b> 提示<br>（仅录音阶段显示，转写阶段不显示）</div>
+        </div>
+        <div class="col">
+          <div class="stage">
+            <div class="hint-top">按下 ESC 后 · 约 0.8 秒自动消失</div>
+            <div class="capsule cancelled">
+              <span class="x-icon">✕</span>
+              <span>已取消</span>
+            </div>
+          </div>
+          <div class="cap">红圈 ✕ + 「已取消」，<b>不粘贴、不计入字数统计</b></div>
+        </div>
+      </div>
+      <ul class="spec">
+        <li>触发：<kbd>Esc</kbd>，仅在<b>录音中</b>生效（长按 / 单击模式均可）</li>
+        <li>转写进行中按 Esc 不响应（此时马上就出结果了，避免误触丢结果）</li>
+        <li>单击模式下「再按一下热键」仍然是<b>结束并转写</b>，语义不变</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ═══ ② 替换选中内容 ═══ -->
+  <section>
+    <h2><span class="num">2</span>替换选中内容</h2>
+    <div class="card">
+      <div class="stage" style="height:170px">
+        <div class="hint-top">目标应用里有选中文本时开始录音</div>
+        <div class="replace-tip">将替换选中的内容</div>
+        <div class="capsule">
+          <span class="bars"><span class="bar"></span><span class="bar"></span><span class="bar"></span></span>
+          <span>识别中</span>
+          <span class="prog-track"><span class="prog-fill"></span></span>
+          <span class="pct">68%</span>
+          <span style="flex:1"></span>
+          <span class="esc-key">ESC 取消</span>
+        </div>
+      </div>
+      <ul class="spec">
+        <li>开始录音瞬间通过<b>辅助功能 API</b> 读取焦点应用的选中文本：有选中 → 胶囊上方浮出绿色提示条「将替换选中的内容」</li>
+        <li>松手后直接 <kbd>⌘V</kbd> —— macOS 原生行为就是<b>粘贴覆盖选中</b>，无需先删后粘，最快且兼容性好</li>
+        <li>没有选中文本 → 与现在完全一致，光标处插入</li>
+        <li>依赖辅助功能权限（应用已在用，无需新授权）；读不到选区信息的应用自动退回插入模式</li>
+      </ul>
+    </div>
+  </section>
+
+  <!-- ═══ ③ 每日听写统计 ═══ -->
+  <section>
+    <h2><span class="num">3</span>每日听写字数统计</h2>
+    <div class="card">
+      <div class="settings">
+        <div class="s-row"><span class="label">触发方式</span><span class="value">长按说话 &gt;</span></div>
+        <div class="s-row hl"><span class="label">今日听写<span class="tag">新增</span></span><span class="value">1,284 字 · 本周 6,032 字</span></div>
+        <div class="s-row"><span class="label">开机时启动</span><span class="value">开</span></div>
+        <div class="footer-note">统计口径：成功输入的转写字符数（去除空白），取消的录音不计入；数据仅保存在本机。</div>
+      </div>
+      <ul class="spec">
+        <li>位置：<b>设置 → 通用</b>页，「语音输入」分组内一行，默认展示「今日 + 本周」</li>
+        <li>计数在粘贴成功后累加（剪贴板兜底路径同样计入）</li>
+        <li>存储用 UserDefaults，按日期键滚动，自动清理 90 天前的旧数据</li>
+      </ul>
+    </div>
+  </section>
+
+  <p class="lead" style="margin-top:-8px">—— 以上三项如无异议回复确认即可，我按 1 → 2 → 3 的顺序开发；哪一项想调整直接说。</p>
+</div>
+</body>
+</html>

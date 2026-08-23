@@ -1,0 +1,214 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SoundIn · 统计页 设计稿</title>
+<style>
+  :root {
+    --bg: #f5f4f1;
+    --card: #ffffff;
+    --ink: #2c2c2a;
+    --sub: #8a8a86;
+    --line: #e8e6e0;
+    --green: #97c459;
+    --g1: #d7ecc0;
+    --g2: #b4dd8a;
+    --g3: #97c459;
+    --g4: #6f9e3d;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    background: var(--bg); color: var(--ink);
+    padding: 44px 24px 80px;
+  }
+  .wrap { max-width: 820px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 600; margin-bottom: 6px; }
+  .lead { color: var(--sub); font-size: 14px; margin-bottom: 36px; line-height: 1.7; }
+  section { margin-bottom: 40px; }
+  h2 { font-size: 15px; font-weight: 600; margin-bottom: 14px; display:flex; align-items:center; gap:8px; }
+  h2 .num {
+    width: 20px; height: 20px; border-radius: 6px;
+    background: var(--green); color: #fff;
+    font-size: 12px; display: inline-flex; align-items: center; justify-content: center;
+  }
+  /* ── 模拟设置窗口 ── */
+  .window {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    overflow: hidden; box-shadow: 0 10px 34px rgba(0,0,0,.07);
+  }
+  .win-body { display: flex; min-height: 430px; }
+  .sidebar {
+    width: 148px; background: #eeece7; padding: 12px 10px;
+    border-right: 1px solid var(--line); flex-shrink: 0;
+  }
+  .side-item {
+    font-size: 13px; color: #55554f;
+    padding: 7px 11px; border-radius: 7px; margin-bottom: 2px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .side-item.active { background: #dcd9d1; color: var(--ink); font-weight: 600; }
+  .dot { width: 14px; height: 14px; border-radius: 4px; background: transparent; border: 1.5px solid #a5a29a; }
+  .side-item.active .dot { background: var(--green); border-color: var(--green); }
+  .detail { flex: 1; padding: 26px 28px; }
+
+  /* ── 方案 A：热力图 ── */
+  .stats-row { display: flex; gap: 12px; margin-bottom: 24px; }
+  .stat-box {
+    flex: 1; background: #fafaf8; border: 1px solid var(--line);
+    border-radius: 10px; padding: 12px 16px;
+  }
+  .stat-box .v { font-size: 21px; font-weight: 700; letter-spacing: -0.02em; }
+  .stat-box .v em { font-style: normal; font-size: 12px; font-weight: 500; color: var(--sub); margin-left: 3px; }
+  .stat-box .k { font-size: 11.5px; color: var(--sub); margin-top: 3px; }
+  .stat-box.today { background: #f4faec; border-color: #dbe9c5; }
+  .stat-box.today .v { color: var(--g4); }
+
+  .heat-wrap {
+    background: #fafaf8; border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px 18px 12px;
+  }
+  .months { display: flex; font-size: 10.5px; color: var(--sub); margin-left: 30px; gap: 52px; margin-bottom: 6px; }
+  .grid-area { display: flex; gap: 8px; }
+  .weekdays {
+    display: grid; grid-template-rows: repeat(7, 15px); gap: 3px;
+    font-size: 10px; color: var(--sub); text-align: right; width: 22px;
+  }
+  .weekdays span:nth-child(2) { visibility: hidden; }
+  .weekdays span:nth-child(4) { visibility: hidden; }
+  .weekdays span:nth-child(6) { visibility: hidden; }
+  .grid { display: flex; gap: 3px; }
+  .col { display: grid; grid-template-rows: repeat(7, 15px); gap: 3px; }
+  .cell { width: 15px; height: 15px; border-radius: 3.5px; background: #ebebe8; }
+  .lv1 { background: var(--g1); } .lv2 { background: var(--g2); }
+  .lv3 { background: var(--g3); } .lv4 { background: var(--g4); }
+  .legend {
+    display: flex; align-items: center; justify-content: flex-end;
+    gap: 4px; margin-top: 12px; font-size: 10.5px; color: var(--sub);
+  }
+  .legend .cell { width: 12px; height: 12px; }
+  .tooltip-demo {
+    position: relative; outline: 2px solid var(--ink); outline-offset: 1px;
+    cursor: help;
+  }
+  .tipbox {
+    position: absolute; bottom: 22px; left: 50%; transform: translateX(-50%);
+    background: var(--ink); color: #fff; font-size: 10.5px;
+    border-radius: 6px; padding: 4px 9px; white-space: nowrap; z-index: 5;
+  }
+  .tipbox::after {
+    content:""; position:absolute; top:100%; left:50%; transform:translateX(-50%);
+    border: 4px solid transparent; border-top-color: var(--ink);
+  }
+
+  /* ── 方案 B：折线图 ── */
+  .chart-wrap {
+    background: #fafaf8; border: 1px solid var(--line); border-radius: 10px;
+    padding: 18px;
+  }
+  .ylabels { display:flex; gap:8px; }
+  .ylab { display:flex; flex-direction:column; justify-content:space-between; font-size:10px; color:var(--sub); text-align:right; height:150px; width:34px; }
+  svg.chart { display:block; }
+  .xlabels { display:flex; justify-content:space-between; font-size:10px; color:var(--sub); margin: 8px 0 0 42px; }
+
+  .note {
+    font-size: 12.5px; color: var(--sub); line-height: 1.8;
+    margin-top: 16px; padding-left: 16px; position: relative;
+  }
+  .note::before { content:""; position:absolute; left:2px; top:8px; width:6px; height:6px; border-radius:50%; background:var(--green); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SoundIn · 「统计」独立页设计稿</h1>
+  <p class="lead">今日听写从通用页移出，升级为独立菜单页。两个视图方案：A = GitHub 风格热力图（推荐），B = 近 30 天折线图。也可以 A 为主、B 作为切换视图。</p>
+
+  <!-- ═══ 方案 A ═══ -->
+  <section>
+    <h2><span class="num">A</span>热力图（GitHub 风格 · 推荐）</h2>
+    <div class="window">
+      <div class="win-body">
+        <div class="sidebar">
+          <div class="side-item"><span class="dot"></span>通用</div>
+          <div class="side-item"><span class="dot"></span>快捷键</div>
+          <div class="side-item"><span class="dot"></span>识别引擎</div>
+          <div class="side-item"><span class="dot"></span>文字优化</div>
+          <div class="side-item"><span class="dot"></span>录音测试</div>
+          <div class="side-item active"><span class="dot"></span>统计</div>
+          <div class="side-item"><span class="dot"></span>关于</div>
+        </div>
+        <div class="detail">
+          <div class="stats-row">
+            <div class="stat-box today"><div class="v">1,284<em>字</em></div><div class="k">今日</div></div>
+            <div class="stat-box"><div class="v">6,032<em>字</em></div><div class="k">本周</div></div>
+            <div class="stat-box"><div class="v">48,917<em>字</em></div><div class="k">累计（90 天）</div></div>
+          </div>
+          <div class="heat-wrap">
+            <div class="months"><span>六月</span><span>七月</span><span>八月</span></div>
+            <div class="grid-area">
+              <div class="weekdays"><span>一</span><span></span><span>三</span><span></span><span>五</span><span></span><span>日</span></div>
+              <div class="grid">
+                <!-- 随机模拟的热力数据 -->
+                <div class="col"><div class="cell lv2"></div><div class="cell"></div><div class="cell lv1"></div><div class="cell lv3"></div><div class="cell lv2"></div><div class="cell lv1"></div><div class="cell"></div></div>
+                <div class="col"><div class="cell lv3"></div><div class="cell lv1"></div><div class="cell lv2"></div><div class="cell lv4"></div><div class="cell lv3"></div><div class="cell lv2"></div><div class="cell lv1"></div></div>
+                <div class="col"><div class="cell lv2"></div><div class="cell lv3"></div><div class="cell"></div><div class="cell lv1"></div><div class="cell lv2"></div><div class="cell lv3"></div><div class="cell lv4"></div></div>
+                <div class="col"><div class="cell lv1"></div><div class="cell lv2"></div><div class="cell lv3"></div><div class="cell lv2"></div><div class="cell"></div><div class="cell lv1"></div><div class="cell lv2"></div></div>
+                <div class="col"><div class="cell lv3"></div><div class="cell lv4"></div><div class="cell lv2"></div><div class="cell lv3"></div><div class="cell lv1"></div><div class="cell lv2"></div><div class="cell lv3"></div></div>
+                <div class="col"><div class="cell lv2"></div><div class="cell lv3"></div><div class="cell lv4"></div><div class="cell lv1"></div><div class="cell lv2"></div><div class="cell lv3"></div><div class="cell lv2"></div></div>
+                <div class="col"><div class="cell"></div><div class="cell lv1"></div><div class="cell lv2"></div><div class="cell lv3"></div><div class="cell lv4"></div><div class="cell lv2"></div><div class="cell lv1"></div></div>
+                <div class="col"><div class="cell lv1"></div><div class="cell lv3"></div><div class="cell lv2"></div><div class="cell"></div><div class="cell lv3"></div><div class="cell lv4"></div><div class="cell lv2"></div></div>
+                <div class="col"><div class="cell lv2"></div><div class="cell lv1"></div><div class="cell lv3"></div><div class="cell lv2"></div><div class="cell lv1"></div><div class="cell lv3"></div><div class="cell"></div></div>
+                <div class="col"><div class="cell lv3"></div><div class="cell lv2"></div><div class="cell lv4"></div><div class="cell lv3"></div><div class="cell lv2"></div><div class="cell lv1"></div><div class="cell lv3"></div></div>
+                <div class="col"><div class="cell lv4"></div><div class="cell lv2"></div><div class="cell lv3"></div><div class="cell lv1"></div><div class="cell tooltip-demo"><span class="tipbox">8月21日 · 2,140 字</span></div><div class="cell lv3"></div><div class="cell lv4"></div></div>
+                <div class="col"><div class="cell lv3"></div><div class="cell lv4"></div><div class="cell lv2"></div><div class="cell lv3"></div><div class="cell lv1"></div><div class="cell"></div><div class="cell lv2"></div></div>
+                <div class="col"><div class="cell lv2"></div><div class="cell lv3"></div><div class="cell lv1"></div><div class="cell lv2"></div><div class="cell lv4"></div><div class="cell lv3"></div><div class="cell lv1"></div></div>
+              </div>
+            </div>
+            <div class="legend">
+              <span>少</span>
+              <span class="cell"></span><span class="cell lv1"></span><span class="cell lv2"></span><span class="cell lv3"></span><span class="cell lv4"></span>
+              <span>多</span>
+            </div>
+          </div>
+          <div class="note">展示最近 13 周（约一个季度），鼠标悬停显示当天日期与字数；颜色梯度用 SoundIn 品牌绿，零听写的日子为浅灰。</div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ═══ 方案 B ═══ -->
+  <section>
+    <h2><span class="num">B</span>折线图（近 30 天）</h2>
+    <div class="window" style="max-width:520px">
+      <div class="detail">
+        <div class="stats-row" style="margin-bottom:16px">
+          <div class="stat-box today"><div class="v">1,284<em>字</em></div><div class="k">今日</div></div>
+          <div class="stat-box"><div class="v">6,032<em>字</em></div><div class="k">本周</div></div>
+        </div>
+        <div class="chart-wrap">
+          <div class="ylabels">
+            <div class="ylab"><span>3千</span><span>2千</span><span>1千</span><span>0</span></div>
+            <svg class="chart" width="400" height="150" viewBox="0 0 400 150">
+              <line x1="0" y1="37.5" x2="400" y2="37.5" stroke="#ececea" stroke-width="1"/>
+              <line x1="0" y1="75" x2="400" y2="75" stroke="#ececea" stroke-width="1"/>
+              <line x1="0" y1="112.5" x2="400" y2="112.5" stroke="#ececea" stroke-width="1"/>
+              <path d="M0,120 L27,105 L55,112 L82,88 L110,96 L137,72 L165,84 L192,60 L220,70 L247,48 L275,58 L302,40 L330,52 L357,30 L385,42"
+                    fill="none" stroke="#97C459" stroke-width="2.5" stroke-linejoin="round" stroke-linecap="round"/>
+              <circle cx="385" cy="42" r="4" fill="#97C459" stroke="#fff" stroke-width="2"/>
+            </svg>
+          </div>
+          <div class="xlabels"><span>7月25日</span><span>8月4日</span><span>8月14日</span><span>8月23日</span></div>
+        </div>
+        <div class="note">趋势感更强，但丢失了「哪天空着」的信息；适合看节奏，不适合看坚持。</div>
+      </div>
+    </div>
+  </section>
+
+  <p class="lead" style="margin-top:-4px">
+    我的建议：<b>方案 A 热力图为主</b>（和「每天用了多少」的语义最契合），如果之后想看趋势再在页面里加 A/B 视图切换。
+    确认方案后我开发；选 B 或两者都要也行。
+  </p>
+</div>
+</body>
+</html>

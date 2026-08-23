@@ -1,0 +1,144 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SoundIn · 历史记录 / 麦克风 / 权限按钮 设计稿</title>
+<style>
+  :root {
+    --bg: #f5f4f1; --card: #fff; --ink: #2c2c2a; --sub: #8a8a86;
+    --line: #e8e6e0; --green: #97c459; --g-deep: #6f9e3d;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,"PingFang SC",sans-serif; background:var(--bg); color:var(--ink); padding:44px 24px 80px; }
+  .wrap { max-width:780px; margin:0 auto; }
+  h1 { font-size:22px; font-weight:600; margin-bottom:6px; }
+  .lead { color:var(--sub); font-size:14px; line-height:1.7; margin-bottom:36px; }
+  section { margin-bottom:42px; }
+  h2 { font-size:15px; font-weight:600; display:flex; align-items:center; gap:8px; margin-bottom:14px; }
+  h2 .num { width:20px; height:20px; border-radius:6px; background:var(--green); color:#fff; font-size:12px; display:inline-flex; align-items:center; justify-content:center; }
+
+  /* ── 菜单模拟 ── */
+  .menu {
+    width: 260px; background: rgba(242,242,244,.96);
+    backdrop-filter: blur(20px);
+    border-radius: 12px; border: 1px solid rgba(0,0,0,.08);
+    box-shadow: 0 16px 48px rgba(0,0,0,.18);
+    padding: 5px; font-size: 13px;
+  }
+  .m-status {
+    color: var(--sub); padding: 6px 10px 8px; font-size: 12px;
+    border-bottom: 1px solid rgba(0,0,0,.06); margin-bottom: 4px;
+    display:flex; justify-content:space-between; align-items:center;
+  }
+  .m-status b { color: var(--ink); font-weight: 500; }
+  .m-section {
+    font-size: 11px; color: #98968f; padding: 6px 10px 3px; font-weight:600;
+  }
+  .m-item {
+    padding: 6px 10px; border-radius: 6px; color: var(--ink);
+    display:flex; align-items:center; gap:8px; cursor:default;
+  }
+  .m-item:hover { background: var(--green); color:#fff; }
+  .m-item:hover .t { color: rgba(255,255,255,.75); }
+  .m-item .txt { flex:1; overflow:hidden; white-space:nowrap; text-overflow:ellipsis; }
+  .m-item .t { font-size:11px; color:#a5a29b; flex-shrink:0; }
+  .m-sep { height:1px; background:rgba(0,0,0,.07); margin:5px 8px; }
+  .m-danger { color:#d4553e; }
+
+  /* ── 设置行模拟 ── */
+  .settings {
+    background:var(--card); border:1px solid var(--line); border-radius:12px;
+    overflow:hidden; font-size:13.5px;
+  }
+  .s-row {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:11px 16px; border-bottom:1px solid var(--line); gap:12px;
+  }
+  .s-row:last-child { border-bottom:none; }
+  .s-row .label { font-weight:500; flex-shrink:0; }
+  .picker {
+    background:#efeeea; border:1px solid #dddad2; border-radius:6px;
+    padding:3px 10px; font-size:12.5px; color:var(--ink);
+    display:inline-flex; align-items:center; gap:6px;
+  }
+  .picker::after { content:"▾"; font-size:10px; color:var(--sub); }
+  .footer-note {
+    padding:10px 16px; font-size:12px; color:var(--sub);
+    background:#fafaf8; border-top:1px dashed var(--line); line-height:1.7;
+  }
+  .btn {
+    background:#fff; border:1px solid #dddad2; border-radius:6px;
+    padding:4px 12px; font-size:12.5px; cursor:pointer;
+    box-shadow:0 1px 2px rgba(0,0,0,.05);
+  }
+  .btn.green { background:var(--green); border-color:var(--green); color:#fff; font-weight:500; }
+  .status-ok { color:var(--g-deep); font-size:12.5px; display:inline-flex; align-items:center; gap:4px; }
+  .status-bad { color:#c74a33; font-size:12.5px; display:inline-flex; align-items:center; gap:4px; }
+
+  .note { font-size:12.5px; color:var(--sub); line-height:1.8; margin-top:14px; padding-left:16px; position:relative; }
+  .note::before { content:""; position:absolute; left:2px; top:8px; width:6px; height:6px; border-radius:50%; background:var(--green); }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>SoundIn · 三项新功能设计稿</h1>
+  <p class="lead">最近输入历史 / 麦克风选择 / 权限快捷跳转。确认后按 1 → 2 → 3 开发。</p>
+
+  <!-- ═══ ① 最近输入历史 ═══ -->
+  <section>
+    <h2><span class="num">1</span>最近输入历史（菜单栏下拉内）</h2>
+    <div class="menu">
+      <div class="m-status"><span><b>就绪</b> · ⌥</span><span style="color:var(--g-deep)">今日 1,284 字</span></div>
+      <div class="m-section">最近输入</div>
+      <div class="m-item"><span class="txt">三房转债今天公告了重组进展，江阴国资那边…</span><span class="t">09:42</span></div>
+      <div class="m-item"><span class="txt">帮我 check 一下这个 PR 的 diff</span><span class="t">09:15</span></div>
+      <div class="m-item"><span class="txt">明天上午十点开会讨论可转债日报的排版</span><span class="t">昨天</span></div>
+      <div class="m-item"><span class="txt">畜牧 ETF 可以考虑逢低补一点仓位</span><span class="t">昨天</span></div>
+      <div class="m-item m-danger" style="font-size:12.5px">清空历史</div>
+      <div class="m-sep"></div>
+      <div class="m-item">设置…</div>
+      <div class="m-item">退出</div>
+    </div>
+    <div class="note">最多保留 <b>10 条</b>，新纪录自动去重置顶；<b>点击条目 = 复制到剪贴板</b>（不直接粘贴，避免误触把旧内容打进正在编辑的文档）；「今日 N 字」顺带加进状态行，统计页不变。</div>
+  </section>
+
+  <!-- ═══ ② 麦克风选择 ═══ -->
+  <section>
+    <h2><span class="num">2</span>麦克风选择（识别引擎页）</h2>
+    <div class="settings" style="max-width:480px">
+      <div class="s-row"><span class="label">识别方式</span><span class="picker">本机 Apple 语音识别</span></div>
+      <div class="s-row"><span class="label">识别语言</span><span class="picker">跟随系统</span></div>
+      <div class="s-row"><span class="label">麦克风<span style="color:var(--g-deep)">（新增）</span></span><span class="picker">跟随系统</span></div>
+      <div class="footer-note">选择「跟随系统」时使用系统默认输入设备；指定设备后录音固定走该麦克风，拔掉设备会自动回落到系统默认。</div>
+    </div>
+    <div class="note">设备列表实时枚举（插拔耳机后重新打开设置页即刷新）；配置持久化保存。</div>
+  </section>
+
+  <!-- ═══ ③ 权限快捷跳转 ═══ -->
+  <section>
+    <h2><span class="num">3</span>权限「去授权」按钮（关于页）</h2>
+    <div class="settings" style="max-width:480px">
+      <div class="s-row">
+        <span class="label">麦克风</span>
+        <span class="status-ok">✓ 已授权</span>
+      </div>
+      <div class="s-row">
+        <span class="label">语音识别</span>
+        <span class="status-bad">✗ 未授权</span>
+        <button class="btn green">去授权</button>
+      </div>
+      <div class="s-row">
+        <span class="label">辅助功能（模拟粘贴）</span>
+        <span class="status-bad">✗ 未授权</span>
+        <button class="btn green">去授权</button>
+      </div>
+      <div class="footer-note">点击「去授权」直达对应的 系统设置 → 隐私与安全性 面板（麦克风 / 语音识别与听写 / 辅助功能）。</div>
+    </div>
+    <div class="note">已授权的行保持现状不显示按钮；辅助功能换签名失效的情况也适用——点过去删除旧条目重新添加即可。</div>
+  </section>
+
+  <p class="lead" style="margin-top:-4px">无异议回复确认，我按顺序开发；想调整哪处直接说。</p>
+</div>
+</body>
+</html>
