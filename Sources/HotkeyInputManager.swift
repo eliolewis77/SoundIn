@@ -632,9 +632,9 @@ final class HotkeyInputManager {
                 return
             }
 
-            // 先展示成功态，等绿色对勾圆即将淡出时才真正粘贴，视觉上"内容在胶囊消失的瞬间落进输入框"
-            self?.onStateChange?(.success)
-            try? await Task.sleep(for: .milliseconds(1150))
+            // 方案 C（静默成功）：不演收缩对勾动画，转写完成立即粘贴；
+            // 胶囊随 .idle 同步淡出，"内容出现、气泡消散"即是确认。失败/兜底才显式提示。
+            self?.onStateChange?(.idle)
 
             let inserted = await self?.paste(trimmedText) ?? false
             HotkeyFileLog.shared.log("paste: result inserted=\(inserted)")
@@ -644,8 +644,6 @@ final class HotkeyInputManager {
             if !inserted {
                 self?.onStateChange?(.clipboardFallback)
             }
-            try? await Task.sleep(for: .milliseconds(600))
-            self?.onStateChange?(.idle)
         }
     }
 

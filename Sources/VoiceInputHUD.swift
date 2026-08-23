@@ -7,7 +7,6 @@ import SwiftUI
 enum VoiceInputHUDPhase {
     case recording
     case transcribing
-    case success
     case cancelled
     case failure(message: String)
 }
@@ -39,12 +38,14 @@ final class VoiceInputHUDManager {
             show()
         case .transcribing:
             update(phase: .transcribing, message: "识别中")
-        case .success:
-            update(phase: .success, message: nil)
-            hide(after: 1.2)
-        case .clipboardFallback:
-            update(phase: .failure(message: "已复制，请手动粘贴"), message: nil)
-            hide(after: 1.8)
+        case .success, .clipboardFallback:
+            if case .success = voicePhase {
+                // 方案 C：成功静默，立即淡出
+                hide(after: 0)
+            } else {
+                update(phase: .failure(message: "已复制，请手动粘贴"), message: nil)
+                hide(after: 1.8)
+            }
         case .cancelled:
             update(phase: .cancelled, message: "已取消")
             hide(after: 0.8)
@@ -191,11 +192,8 @@ final class VoiceInputHUDManager {
 // MARK: - 胶囊视图
 struct VoiceInputCapsuleView: View {
     let manager: VoiceInputHUDManager
-    @State private var successCheckVisible = false
     @State private var isVoiceActive = false
 
-    private var isSuccess: Bool { isSuccessPhase(manager.phase) }
-    private var capsuleWidth: CGFloat { isSuccess ? 46 : 168 }
     static let windowWidth: CGFloat = 168
     /// 窗口总高：胶囊 46 + 上方提示区 32（胶囊贴底，与旧版位置一致）
     static let windowHeight: CGFloat = 78
@@ -244,67 +242,33 @@ struct VoiceInputCapsuleView: View {
                 .transition(.opacity)
             }
 
-            if isSuccess {
-                if successCheckVisible {
-                    Image(systemName: "checkmark")
-                        .font(.system(size: 16, weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .transition(.scale(scale: 0.72).combined(with: .opacity))
-                }
-            } else {
-                HStack(spacing: 10) {
-                    Text(hudTitle)
-                        .font(.system(size: 13, weight: .bold))
-                        .foregroundStyle(.white)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.8)
+            HStack(spacing: 10) {
+                Text(hudTitle)
+                    .font(.system(size: 13, weight: .bold))
+                    .foregroundStyle(.white)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.8)
 
-                    Divider()
-                        .frame(height: 13)
-                        .overlay(Color.white.opacity(0.24))
+                Divider()
+                    .frame(height: 13)
+                    .overlay(Color.white.opacity(0.24))
 
-                    statusView
-                }
-                .padding(.horizontal, 16)
-                .frame(height: 46)
-                .transition(.opacity)
+                statusView
             }
+            .padding(.horizontal, 16)
+            .frame(height: 46)
+            .transition(.opacity)
         }
-        .frame(width: capsuleWidth, height: 46)
-        .background(backgroundShape)
+        .background(Color.black.opacity(0.82))
         .clipShape(RoundedRectangle(cornerRadius: 23, style: .continuous))
-        .frame(width: Self.windowWidth, height: 46) // 外层固定 = 窗口尺寸，胶囊居中收缩
-        .animation(.spring(response: 0.45, dampingFraction: 0.85), value: isSuccess)
         .animation(.easeOut(duration: 0.12), value: phaseIdentity)
         .animation(.linear(duration: 0.12), value: manager.progress)
-        .onChange(of: phaseIdentity) { _, _ in
-            successCheckVisible = false
-            guard isSuccess else { return }
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(180))
-                withAnimation(.spring(response: 0.3, dampingFraction: 0.78)) {
-                    successCheckVisible = true
-                }
-            }
-        }
         .onChange(of: manager.audioLevelProxy) { _, level in
             updateVoiceActivity(for: level)
         }
     }
 
     private var hudTitle: String { manager.message }
-
-    private var backgroundShape: some ShapeStyle {
-        if isSuccess {
-            return AnyShapeStyle(LinearGradient(
-                colors: [Color.green, Color.green.opacity(0.76)],
-                startPoint: .topLeading,
-                endPoint: .bottomTrailing
-            ))
-        }
-        return AnyShapeStyle(Color.black.opacity(0.82))
-    }
 
     @ViewBuilder
     private var statusView: some View {
@@ -342,9 +306,6 @@ struct VoiceInputCapsuleView: View {
                 .foregroundStyle(.white.opacity(0.92))
                 .frame(width: 34, alignment: .trailing)
 
-        case .success:
-            EmptyView()
-
         case .cancelled:
             Image(systemName: "xmark.circle.fill")
                 .font(.system(size: 16))
@@ -377,18 +338,12 @@ struct VoiceInputCapsuleView: View {
     }
 
     // MARK: - Helpers（避免 enum 关联值影响动画 identity）
-    private func isSuccessPhase(_ phase: VoiceInputHUDPhase) -> Bool {
-        if case .success = phase { return true }
-        return false
-    }
-
     private var phaseIdentity: Int {
         switch manager.phase {
         case .recording: 0
         case .transcribing: 1
-        case .success: 2
-        case .cancelled: 3
-        case .failure: 4
+        case .cancelled: 2
+        case .failure: 3
         }
     }
 }
