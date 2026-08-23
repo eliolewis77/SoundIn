@@ -203,6 +203,7 @@ private struct SettingsView: View {
     @State private var isTestingEngineConnection = false
     @State private var polishConnectionTest: SpeechManager.ConnectionTestResult?
     @State private var isTestingPolishConnection = false
+    @State private var isConfirmingClearHistory = false
 
     var body: some View {
         NavigationSplitView {
@@ -261,6 +262,16 @@ private struct SettingsView: View {
             }
             Button("取消", role: .cancel) { profilePendingDelete = nil }
         }
+        .confirmationDialog(
+            "清空全部输入历史？",
+            isPresented: $isConfirmingClearHistory,
+            titleVisibility: .visible
+        ) {
+            Button("清空", role: .destructive) { history.clear() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("最近输入记录将全部删除，听写统计数字不受影响。")
+        }
     }
 
     // MARK: - API 配置档辅助
@@ -268,6 +279,7 @@ private struct SettingsView: View {
     /// 切换识别引擎选中的配置档，并同步活动值
     private func selectEngineProfile(_ id: UUID?) {
         profileStore.engineSelectionID = id
+        engineConnectionTest = nil // 配置变化后旧测试结果失效
         if let p = profileStore.selectedEngine {
             speech.speechAPIBaseURL = p.baseURL
             speech.speechAPIKey = p.apiKey
@@ -278,6 +290,7 @@ private struct SettingsView: View {
     /// 切换文字优化选中的配置档，并同步活动值
     private func selectPolishProfile(_ id: UUID?) {
         profileStore.polishSelectionID = id
+        polishConnectionTest = nil // 配置变化后旧测试结果失效
         if let p = profileStore.selectedPolish {
             speech.polishAPIBaseURL = p.baseURL
             speech.polishAPIKey = p.apiKey
@@ -300,6 +313,9 @@ private struct SettingsView: View {
                     profileStore.updateProfile(selection, keyPath: keyPath, value: newValue)
                 }
                 onActiveChange(newValue)
+                // 配置字段变化后，两页的连接测试结果都可能与当前配置不一致，统一失效
+                engineConnectionTest = nil
+                polishConnectionTest = nil
             }
         )
     }
@@ -469,45 +485,30 @@ private struct SettingsView: View {
         if speech.recognitionProvider == .api {
             Section("OpenAI 兼容 API（语音转写）") {
                 engineProfilePicker
-                TextField("Base URL", text: profileFieldBinding(
+                profileFieldsSection(
                     selection: profileStore.engineSelectionID,
-                    keyPath: \.baseURL
-                ) { speech.speechAPIBaseURL = $0 })
-                SecureField("API Key", text: profileFieldBinding(
-                    selection: profileStore.engineSelectionID,
-                    keyPath: \.apiKey
-                ) { speech.speechAPIKey = $0 })
-                TextField("模型名称", text: profileFieldBinding(
-                    selection: profileStore.engineSelectionID,
-                    keyPath: \.modelName
-                ) { speech.speechModelName = $0 })
-                if speech.speechAPIBaseURL.isEmpty || speech.speechAPIKey.isEmpty || speech.speechModelName.isEmpty {
-                    Text("API 模式需要填写 Base URL、API Key 和模型名称。")
-                        .font(.footnote)
-                        .foregroundStyle(.red)
+                    baseLabel: "Base URL",
+                    onBaseChange: { speech.speechAPIBaseURL = $0 },
+                    onKeyChange: { speech.speechAPIKey = $0 },
+                    onModelChange: { speech.speechModelName = $0 },
+                    missingWarning: (speech.speechAPIBaseURL.isEmpty || speech.speechAPIKey.isEmpty || speech.speechModelName.isEmpty)
+                        ? "API 模式需要填写 Base URL、API Key 和模型名称。" : nil
+                )
+                profileActionRow(
+                    target: .engine,
+                    selected: profileStore.selectedEngine,
+                    isTesting: isTestingEngineConnection,
+                    testResult: engineConnectionTest
+                ) {
+                    isTestingEngineConnection = true
+                    engineConnectionTest = nil
+                    let base = speech.speechAPIBaseURL
+                    let key = speech.speechAPIKey
+                    let model = speech.speechModelName
+                    let result = await SpeechManager.shared.testAPIConnection(baseURL: base, apiKey: key, model: model)
+                    engineConnectionTest = result
+                    isTestingEngineConnection = false
                 }
-                HStack {
-                    Button("＋ 添加配置…") {
-                        addProfileTarget = .engine
-                        newProfileName = ""
-                        isAddingProfile = true
-                    }
-                    Button("删除当前配置", role: .destructive) {
-                        profilePendingDelete = profileStore.selectedEngine
-                    }
-                    .disabled(profileStore.profiles.count <= 1)
-                    connectionTestButton(isRunning: isTestingEngineConnection) {
-                        isTestingEngineConnection = true
-                        engineConnectionTest = nil
-                        let base = speech.speechAPIBaseURL
-                        let key = speech.speechAPIKey
-                        let model = speech.speechModelName
-                        let result = await SpeechManager.shared.testAPIConnection(baseURL: base, apiKey: key, model: model)
-                        engineConnectionTest = result
-                        isTestingEngineConnection = false
-                    }
-                }
-                connectionTestResult(engineConnectionTest)
                 Text("下方字段即当前选中的配置，直接修改会保存回该配置档。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
@@ -524,6 +525,54 @@ private struct SettingsView: View {
             Task { await action() }
         }
         .disabled(isRunning)
+    }
+
+    // MARK: - 配置档公共组件（识别引擎页 / 文字优化页共用）
+
+    /// 配置档三字段（Base URL / API Key / 模型名称）+ 缺字段提示
+    @ViewBuilder
+    private func profileFieldsSection(
+        selection: UUID?,
+        baseLabel: String,
+        onBaseChange: @escaping (String) -> Void,
+        onKeyChange: @escaping (String) -> Void,
+        onModelChange: @escaping (String) -> Void,
+        missingWarning: String?
+    ) -> some View {
+        TextField(baseLabel, text: profileFieldBinding(selection: selection, keyPath: \.baseURL, onActiveChange: onBaseChange))
+        SecureField("API Key", text: profileFieldBinding(selection: selection, keyPath: \.apiKey, onActiveChange: onKeyChange))
+        TextField("模型名称", text: profileFieldBinding(selection: selection, keyPath: \.modelName, onActiveChange: onModelChange))
+        if let missingWarning {
+            Text(missingWarning)
+                .font(.footnote)
+                .foregroundStyle(.red)
+        }
+    }
+
+    /// 配置操作行：添加 / 删除当前配置 / 测试连接 + 测试结果
+    @ViewBuilder
+    private func profileActionRow(
+        target: Page,
+        selected: APIProfile?,
+        isTesting: Bool,
+        testResult: SpeechManager.ConnectionTestResult?,
+        onTest: @escaping () async -> Void
+    ) -> some View {
+        HStack {
+            Button("＋ 添加配置") {
+                addProfileTarget = target
+                newProfileName = ""
+                isAddingProfile = true
+            }
+            Button("删除当前配置", role: .destructive) {
+                profilePendingDelete = selected
+            }
+            .disabled(profileStore.profiles.count <= 1)
+            connectionTestButton(isRunning: isTesting) {
+                await onTest()
+            }
+        }
+        connectionTestResult(testResult)
     }
 
     /// 连接测试结果：独立一行显示在按钮行下方，避免挤在按钮右侧
@@ -549,45 +598,30 @@ private struct SettingsView: View {
         if speech.polishEnabled {
             Section("优化模型（OpenAI 兼容）") {
                 polishProfilePicker
-                TextField("接口地址", text: profileFieldBinding(
+                profileFieldsSection(
                     selection: profileStore.polishSelectionID,
-                    keyPath: \.baseURL
-                ) { speech.polishAPIBaseURL = $0 })
-                SecureField("API Key", text: profileFieldBinding(
-                    selection: profileStore.polishSelectionID,
-                    keyPath: \.apiKey
-                ) { speech.polishAPIKey = $0 })
-                TextField("模型名称", text: profileFieldBinding(
-                    selection: profileStore.polishSelectionID,
-                    keyPath: \.modelName
-                ) { speech.polishModelName = $0 })
-                if speech.polishAPIBaseURL.isEmpty || speech.polishModelName.isEmpty {
-                    Text("需要填写接口地址和模型名称才能启用文字优化。")
-                        .font(.footnote)
-                        .foregroundStyle(.red)
+                    baseLabel: "接口地址",
+                    onBaseChange: { speech.polishAPIBaseURL = $0 },
+                    onKeyChange: { speech.polishAPIKey = $0 },
+                    onModelChange: { speech.polishModelName = $0 },
+                    missingWarning: (speech.polishAPIBaseURL.isEmpty || speech.polishModelName.isEmpty)
+                        ? "需要填写接口地址和模型名称才能启用文字优化。" : nil
+                )
+                profileActionRow(
+                    target: .polish,
+                    selected: profileStore.selectedPolish,
+                    isTesting: isTestingPolishConnection,
+                    testResult: polishConnectionTest
+                ) {
+                    isTestingPolishConnection = true
+                    polishConnectionTest = nil
+                    let base = speech.polishAPIBaseURL
+                    let key = speech.polishAPIKey
+                    let model = speech.polishModelName
+                    let result = await SpeechManager.shared.testAPIConnection(baseURL: base, apiKey: key, model: model)
+                    polishConnectionTest = result
+                    isTestingPolishConnection = false
                 }
-                HStack {
-                    Button("＋ 添加配置…") {
-                        addProfileTarget = .polish
-                        newProfileName = ""
-                        isAddingProfile = true
-                    }
-                    Button("删除当前配置", role: .destructive) {
-                        profilePendingDelete = profileStore.selectedPolish
-                    }
-                    .disabled(profileStore.profiles.count <= 1)
-                    connectionTestButton(isRunning: isTestingPolishConnection) {
-                        isTestingPolishConnection = true
-                        polishConnectionTest = nil
-                        let base = speech.polishAPIBaseURL
-                        let key = speech.polishAPIKey
-                        let model = speech.polishModelName
-                        let result = await SpeechManager.shared.testAPIConnection(baseURL: base, apiKey: key, model: model)
-                        polishConnectionTest = result
-                        isTestingPolishConnection = false
-                    }
-                }
-                connectionTestResult(polishConnectionTest)
             }
 
             Section("优化指令（Prompt）") {
@@ -710,7 +744,7 @@ private struct SettingsView: View {
                             .buttonStyle(.link)
                     }
                 }
-                Button("清空历史", role: .destructive) { history.clear() }
+                Button("清空历史", role: .destructive) { isConfirmingClearHistory = true }
             }
         }
     }

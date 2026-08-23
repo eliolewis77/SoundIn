@@ -842,24 +842,20 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             return await transcribeRecordedAudioFile()
         }
 
-        let timeout = Date().addingTimeInterval(1.2)
-        var lastText = transcribedText
-        var lastChange = Date()
-
-        while Date() < timeout {
-            try? await Task.sleep(for: .milliseconds(80))
-
-            if transcribedText != lastText {
-                lastText = transcribedText
-                lastChange = Date()
-            }
-
-            if recognitionDidFinish || Date().timeIntervalSince(lastChange) > 0.35 {
-                break
-            }
+        // 本地引擎：只认 SFSpeechRecognizer 的完成信号（recognitionDidFinish），
+        // 不再用「1.2s 固定超时 + 0.35s 静默即截断」——慢速语音的尾字间隔超过
+        // 0.35s 时会被提前截掉。8s 兜底防异常场景挂死（正常识别远快于此）。
+        let deadline = Date().addingTimeInterval(8)
+        while !recognitionDidFinish && Date() < deadline {
+            try? await Task.sleep(for: .milliseconds(50))
         }
+        return transcribedText.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
 
-        return lastText.trimmingCharacters(in: .whitespacesAndNewlines)
+    /// 本地引擎识别结束（正常 final 或错误）：置位完成标志并停录
+    private func finishLocalRecognition() {
+        recognitionDidFinish = true
+        stopRecording()
     }
 
     /// stopRecordingAndWaitForText 的日志版结果（供热键路径记录转写结果长度）
@@ -1155,11 +1151,9 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                     self.lastPermissionError = .failure(message: message)
                     // errorMessage isn't shown on the main capsule UI, so also surface a HUD toast
                 }
-                self.recognitionDidFinish = true
-                self.stopRecording()
+                self.finishLocalRecognition()
             } else if isFinal {
-                self.recognitionDidFinish = true
-                self.stopRecording()
+                self.finishLocalRecognition()
             }
         }
         let recognitionHandler: @Sendable (SFSpeechRecognitionResult?, Error?) -> Void = { result, error in
