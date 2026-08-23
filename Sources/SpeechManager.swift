@@ -95,15 +95,6 @@ private final class SegmentedAudioFileWriter: @unchecked Sendable {
     private let minimumSilenceDuration: TimeInterval = 0.45
     private let overlapDuration: TimeInterval = 0.4
     private let silencePowerThreshold: Float = -45
-    /// 实时预览模式：强制按此间隔切段（nil = 关闭，走默认静音/时长逻辑）
-    private var previewRotationInterval: TimeInterval?
-
-    /// 开启实时预览时由 SpeechManager 调用；预览需要短段才能边说边出字
-    func setPreviewRotationInterval(_ interval: TimeInterval?) {
-        lock.lock()
-        defer { lock.unlock() }
-        previewRotationInterval = interval
-    }
     private let speechPowerThreshold: Float = -42
 
     func start(sessionID: UUID, format: AVAudioFormat) throws -> URL {
@@ -258,13 +249,6 @@ private final class SegmentedAudioFileWriter: @unchecked Sendable {
         guard let recordingFormat, currentSegmentHasSpeech else { return false }
 
         let sampleRate = recordingFormat.sampleRate
-
-        // 实时预览：忽略最短段/静音限制，达到固定间隔即切段，让转写结果尽早出来
-        if let interval = previewRotationInterval,
-           Double(currentSegmentFrameCount) / sampleRate >= interval {
-            return true
-        }
-
         let minimumFrames = AVAudioFramePosition(sampleRate * minimumSegmentDuration)
         let maximumFrames = AVAudioFramePosition(sampleRate * maximumSegmentDuration)
         let requiredSilenceFrames = AVAudioFramePosition(sampleRate * minimumSilenceDuration)
@@ -282,7 +266,6 @@ private final class SegmentedAudioFileWriter: @unchecked Sendable {
         nextIndex = 0
         currentURL = nil
         fullURL = nil
-        previewRotationInterval = nil
         completedSegments.removeAll()
         recentBuffers.removeAll()
         recentFrameCount = 0
@@ -1009,8 +992,6 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
 
         let useSegments = useSegmentedAPIRecording
         if useSegments {
-            // 实时预览：每 4 秒强制切一个预览段（最终转写仍用完整音频，质量不受影响）
-            segmentedAudioWriter.setPreviewRotationInterval(livePreviewEnabled ? 4 : nil)
             recordedAudioURL = try segmentedAudioWriter.start(sessionID: sessionID, format: recordingFormat)
             audioFileWriter.close()
         } else {
