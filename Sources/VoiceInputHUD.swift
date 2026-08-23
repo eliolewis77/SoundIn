@@ -28,6 +28,9 @@ final class VoiceInputHUDManager {
     private var hudWindow: NSPanel?
     private var hideTask: Task<Void, Never>?
     private var progressTask: Task<Void, Never>?
+    /// 显示代际计数：每次 show 递增。旧的 hide 动画完成回调据此判断是否已被新会话取代，
+    /// 避免快速连按时把新显示的胶囊 orderOut 藏掉。
+    private var showGeneration = 0
 
     private init() {}
 
@@ -59,6 +62,7 @@ final class VoiceInputHUDManager {
 
     // MARK: - 展示逻辑
     private func show() {
+        showGeneration += 1 // 使旧 hide 动画的完成回调失效
         cancelHideTask()
         stopProgressSimulation()
         phase = .recording
@@ -96,6 +100,7 @@ final class VoiceInputHUDManager {
             // 失败/取消提示若发生在窗口从未显示时（典型：权限拒绝、启动失败），
             // 此前会在这里被直接吞掉，用户得不到任何反馈。这类状态先把窗口亮出来。
             if isFailureLikePhase(newPhase) {
+                showGeneration += 1 // 使在途的 hide 动画完成回调失效，避免误藏新提示
                 let failureWindow = ensureWindow()
                 positionAtBottomCenter(failureWindow)
                 failureWindow.alphaValue = 0
@@ -122,13 +127,23 @@ final class VoiceInputHUDManager {
         cancelHideTask()
         guard let window = hudWindow else { return }
 
-        let hideAction = {
+        // 记录当前显示代际：若淡出动画完成前又开始了新会话（show 已递增代际），
+        // 则跳过 orderOut 与状态复位，避免把新胶囊藏掉 / 清掉新会话状态。
+        let generation = showGeneration
+        let hideAction = { [weak self] in
             NSAnimationContext.runAnimationGroup({ context in
                 context.duration = 0.16
                 context.timingFunction = CAMediaTimingFunction(name: .easeIn)
                 window.animator().alphaValue = 0
             }, completionHandler: {
+                guard let self, generation == self.showGeneration else { return }
                 window.orderOut(nil)
+                // 复位展示状态：否则下次 show 时残留的 .transcribing 进度条会被
+                // .animation(value: progress) 播放「0.9→0 快速向左收缩」的过渡动画。
+                // 复位发生在窗口不可见之后，用户看不到这段过渡。
+                self.phase = .recording
+                self.progress = 0
+                self.willReplaceSelection = false
             })
         }
 
