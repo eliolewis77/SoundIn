@@ -25,6 +25,7 @@ final class HotkeyFileLog: @unchecked Sendable {
         let line = "\(Self.stamp()) \(message)\n"
         let path = NSString(string: "~/Library/Logs/VoiceScribe-debug.log").expandingTildeInPath
         queue.async {
+            Self.rotateIfNeeded(path: path)
             if let handle = FileHandle(forWritingAtPath: path) {
                 defer { try? handle.close() }
                 handle.seekToEndOfFile()
@@ -33,6 +34,16 @@ final class HotkeyFileLog: @unchecked Sendable {
                 try? line.write(toFile: path, atomically: true, encoding: .utf8)
             }
         }
+    }
+
+    /// 日志超过 5MB 时归档为 .old（只保留最近一份旧日志），避免无限增长
+    private static func rotateIfNeeded(path: String) {
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
+              let size = attrs[.size] as? Int,
+              size > 5 * 1024 * 1024 else { return }
+        let oldPath = path + ".old"
+        try? FileManager.default.removeItem(atPath: oldPath)
+        try? FileManager.default.moveItem(atPath: path, toPath: oldPath)
     }
 }
 

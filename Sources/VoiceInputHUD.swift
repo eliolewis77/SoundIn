@@ -178,7 +178,7 @@ final class VoiceInputHUDManager {
     /// 窗口固定尺寸（与视图外层 frame 一致）：收缩动画发生在窗口内部，
     /// 窗口本身不做 setFrame 跳变（否则与 SwiftUI 动画不同步，视觉错位）。
     /// 高度 = 胶囊 46 + 上方替换提示条区 32；胶囊始终贴底，位置与旧版一致
-    private static let windowSize = NSSize(width: 136, height: 72)
+    static let windowSize = NSSize(width: 136, height: 72)
     /// 胶囊本体高度（视图布局用）
     static let capsuleHeight: CGFloat = 40
 
@@ -202,7 +202,11 @@ final class VoiceInputHUDManager {
     }
 
     private func positionAtBottomCenter(_ window: NSPanel) {
-        guard let screen = NSScreen.main else { return }
+        // 多屏场景：HUD 应跟随鼠标所在屏（而不是 key window 所在屏），
+        // 否则键鼠在主屏、App 窗口在副屏时胶囊会弹到看不见的地方。
+        let mouseLocation = NSEvent.mouseLocation
+        let screen = NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) } ?? NSScreen.main
+        guard let screen else { return }
         let screenFrame = screen.visibleFrame
         let size = Self.windowSize
         let x = screenFrame.minX + (screenFrame.width - size.width) / 2
@@ -216,9 +220,9 @@ struct VoiceInputCapsuleView: View {
     let manager: VoiceInputHUDManager
     @State private var isVoiceActive = false
 
-    static let windowWidth: CGFloat = 136
+    static let windowWidth: CGFloat = VoiceInputHUDManager.windowSize.width
     /// 窗口总高：胶囊 40 + 上方提示区 32（胶囊贴底）
-    static let windowHeight: CGFloat = 72
+    static let windowHeight: CGFloat = VoiceInputHUDManager.windowSize.height
 
     var body: some View {
         VStack(spacing: 7) {
@@ -282,7 +286,7 @@ struct VoiceInputCapsuleView: View {
             .padding(.leading, 15)
             .padding(.trailing, 13)
         }
-        .frame(width: Self.windowWidth, height: 40) // 胶囊固定尺寸：约束识别中进度条（GeometryReader）不撑满窗口
+        .frame(width: Self.windowWidth, height: VoiceInputHUDManager.capsuleHeight) // 胶囊固定尺寸：约束识别中进度条（GeometryReader）不撑满窗口
         .background(Color.black.opacity(0.82))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .animation(.easeOut(duration: 0.12), value: phaseIdentity)
@@ -336,7 +340,7 @@ struct VoiceInputCapsuleView: View {
                 .foregroundStyle(Color.red)
                 .frame(width: 22)
 
-        case .failure(let _):
+        case .failure:
             Image(systemName: "exclamationmark")
                 .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(Color.orange)
