@@ -156,9 +156,9 @@ final class VoiceInputHUDManager {
     /// 窗口固定尺寸（与视图外层 frame 一致）：收缩动画发生在窗口内部，
     /// 窗口本身不做 setFrame 跳变（否则与 SwiftUI 动画不同步，视觉错位）。
     /// 高度 = 胶囊 46 + 上方替换提示条区 32；胶囊始终贴底，位置与旧版一致
-    private static let windowSize = NSSize(width: 168, height: 78)
+    private static let windowSize = NSSize(width: 148, height: 72)
     /// 胶囊本体高度（视图布局用）
-    static let capsuleHeight: CGFloat = 46
+    static let capsuleHeight: CGFloat = 40
 
     private func ensureWindow() -> NSPanel {
         if let hudWindow { return hudWindow }
@@ -194,9 +194,9 @@ struct VoiceInputCapsuleView: View {
     let manager: VoiceInputHUDManager
     @State private var isVoiceActive = false
 
-    static let windowWidth: CGFloat = 168
-    /// 窗口总高：胶囊 46 + 上方提示区 32（胶囊贴底，与旧版位置一致）
-    static let windowHeight: CGFloat = 78
+    static let windowWidth: CGFloat = 148
+    /// 窗口总高：胶囊 40 + 上方提示区 32（胶囊贴底）
+    static let windowHeight: CGFloat = 72
 
     var body: some View {
         VStack(spacing: 7) {
@@ -242,24 +242,24 @@ struct VoiceInputCapsuleView: View {
                 .transition(.opacity)
             }
 
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Text(hudTitle)
-                    .font(.system(size: 13, weight: .bold))
+                    .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(.white)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
 
                 Divider()
-                    .frame(height: 13)
+                    .frame(height: 11)
                     .overlay(Color.white.opacity(0.24))
 
                 statusView
             }
-            .padding(.horizontal, 16)
+            .padding(.horizontal, 14)
         }
-        .frame(width: Self.windowWidth, height: 46) // 胶囊固定尺寸：约束识别中进度条（GeometryReader）不撑满窗口
+        .frame(width: Self.windowWidth, height: 40) // 胶囊固定尺寸：约束识别中进度条（GeometryReader）不撑满窗口
         .background(Color.black.opacity(0.82))
-        .clipShape(RoundedRectangle(cornerRadius: 23, style: .continuous))
+        .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .animation(.easeOut(duration: 0.12), value: phaseIdentity)
         .animation(.linear(duration: 0.12), value: manager.progress)
         .onChange(of: manager.audioLevelProxy) { _, level in
@@ -280,22 +280,22 @@ struct VoiceInputCapsuleView: View {
                             let level = waveLevel(at: timeline.date, index: index)
                             Capsule(style: .continuous)
                                 .fill(.white)
-                                .frame(width: 3, height: 5 + level * 11)
+                                .frame(width: 3, height: 4 + level * 9.5)
                                 .opacity(0.62 + level * 0.34)
                         }
                     }
-                    .frame(width: 28, height: 16)
+                    .frame(width: 24, height: 14)
                 }
             } else {
                 HStack(spacing: 4) {
                     ForEach(0..<4, id: \.self) { _ in
                         Capsule(style: .continuous)
                             .fill(.white)
-                            .frame(width: 3, height: 4)
+                            .frame(width: 3, height: 3.5)
                             .opacity(0.72)
                     }
                 }
-                .frame(width: 28, height: 16)
+                .frame(width: 24, height: 14)
             }
 
         case .transcribing:
@@ -303,19 +303,19 @@ struct VoiceInputCapsuleView: View {
                 .font(.system(size: 10, weight: .bold, design: .rounded))
                 .monospacedDigit()
                 .foregroundStyle(.white.opacity(0.92))
-                .frame(width: 34, alignment: .trailing)
+                .frame(width: 32, alignment: .trailing)
 
         case .cancelled:
             Image(systemName: "xmark.circle.fill")
-                .font(.system(size: 16))
+                .font(.system(size: 14))
                 .foregroundStyle(Color.red)
-                .frame(width: 25)
+                .frame(width: 22)
 
         case .failure(let _):
             Image(systemName: "exclamationmark")
-                .font(.system(size: 12, weight: .bold))
+                .font(.system(size: 11, weight: .bold))
                 .foregroundStyle(Color.orange)
-                .frame(width: 25)
+                .frame(width: 22)
         }
     }
 
