@@ -624,16 +624,15 @@ private struct SettingsView: View {
                 .disabled(SpeechManager.shared.isRecording && !isTestRecording)
 
                 Spacer()
-
-                if isTestRecording {
-                    Label("正在录音…", systemImage: "mic.fill")
-                        .foregroundStyle(.red)
-                        .font(.footnote)
-                } else if isTranscribing {
-                    Text("识别中…")
-                        .foregroundStyle(.secondary)
-                        .font(.footnote)
-                }
+            }
+            if isTestRecording {
+                Label("正在录音…", systemImage: "mic.fill")
+                    .foregroundStyle(.red)
+                    .font(.footnote)
+            } else if isTranscribing {
+                Text("识别中…")
+                    .foregroundStyle(.secondary)
+                    .font(.footnote)
             }
             if !testResult.isEmpty {
                 Text(testResult)
