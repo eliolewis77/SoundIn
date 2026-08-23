@@ -626,7 +626,22 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
     var isPTTMode = false
     var isTestMode = false
     var transcribedText = ""
-    var audioLevel: CGFloat = 0.0
+    /// 本次录音期间是否检测到有效人声（全程无人声时松手不发起转写请求，静音不调 API）
+    private(set) var hasDetectedSpeech = false
+    /// 连续超过人声阈值的音频帧数（避免环境短促噪声误判）
+    private var speechLevelFrames = 0
+    var audioLevel: CGFloat = 0.0 {
+        didSet {
+            // 人声检测：连续 3 帧超过阈值（约 60ms）判定本次录音有人声。
+            // 与 HUD 波形共用电平数据，不额外处理音频。
+            if audioLevel >= 0.10 {
+                speechLevelFrames += 1
+                if speechLevelFrames >= 3 { hasDetectedSpeech = true }
+            } else {
+                speechLevelFrames = 0
+            }
+        }
+    }
     var errorMessage: String?
     var lastPermissionError: VoiceInputPhase = .idle
 
@@ -838,6 +853,13 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         let provider = activeRecognitionProvider
         stopRecording()
 
+        // 静音检测：全程无人声 → 不发起转写请求。
+        // 既省 API 调用，也从根上避免 Whisper 类模型对静音音频的幻觉输出（如"嗯。"）。
+        if !hasDetectedSpeech {
+            HotkeyFileLog.shared.log("rec: no speech detected — skip transcription request")
+            return ""
+        }
+
         if provider == .api {
             return await transcribeRecordedAudioFile()
         }
@@ -988,6 +1010,9 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
     private func startRecording() throws {
         activeRecognitionProvider = SpeechManager.shared.recognitionProvider
         lastCompletedRecognitionProvider = activeRecognitionProvider
+        // 每次录音重置人声检测
+        hasDetectedSpeech = false
+        speechLevelFrames = 0
 
         switch activeRecognitionProvider {
         case .local:

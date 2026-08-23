@@ -692,7 +692,12 @@ private struct SettingsView: View {
             Task { @MainActor in
                 let text = await SpeechManager.shared.stopRecordingAndWaitForText()
                 let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-                testResult = trimmed.isEmpty ? "（未识别到内容，请检查配置或重试）" : trimmed
+                // 区分「没说话」与「说了但识别失败」，给出针对性提示
+                testResult = trimmed.isEmpty
+                    ? (SpeechManager.shared.hasDetectedSpeech
+                        ? "（未识别到内容，请检查配置或重试）"
+                        : "（未检测到声音，请说话后再试）")
+                    : trimmed
                 isTranscribing = false
                 SpeechManager.shared.resetSession()
             }

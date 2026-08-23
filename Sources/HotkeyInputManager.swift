@@ -541,6 +541,23 @@ final class HotkeyInputManager {
         }
     }
 
+    /// 判定转写结果是否"无实际内容"：空、纯标点、或纯语气词——
+    /// 语音转写模型对静音音频的典型幻觉输出（如"嗯。"）。命中时视为没说话，
+    /// 跳过粘贴与统计，避免静音松手往文档里塞语气词。
+    static func isEffectivelyEmpty(_ text: String) -> Bool {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty { return true }
+        // 去掉空白与标点后剩余的核心字（如"嗯。"→"嗯"）
+        let core = trimmed.filter { !$0.isWhitespace && !$0.isNewline && !$0.isPunctuation }
+        if core.isEmpty { return true }
+        let normalized = core.lowercased()
+        let fillers: Set<String> = [
+            "嗯", "啊", "呃", "哦", "诶", "哎", "唔", "嗯嗯", "啊啊",
+            "em", "um", "hmm", "hm", "en", "oh"
+        ]
+        return fillers.contains(normalized)
+    }
+
     private func startRecording() {
         guard !isFinishing else { return }
         // 权限不满足时明确上报，不再静默返回（此前热键按下后"没反应"的根源之一）
@@ -638,7 +655,8 @@ final class HotkeyInputManager {
             SpeechManager.shared.logTranscriptionResult(text)
             SpeechManager.shared.resetSession()
             var trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !trimmedText.isEmpty else {
+            guard !Self.isEffectivelyEmpty(trimmedText) else {
+                HotkeyFileLog.shared.log("rec: filtered empty-ish result (\(text.count) chars) — skipped paste")
                 self?.onStateChange?(.idle)
                 return
             }
