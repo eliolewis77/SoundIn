@@ -5,7 +5,7 @@
     <key>CFBundleDevelopmentRegion</key>
     <string>zh-Hans</string>
     <key>CFBundleExecutable</key>
-    <string>VoiceScribe</string>
+    <string>SoundIn</string>
     <key>CFBundleIdentifier</key>
     <string>com.codespace.voicescribe</string>
     <key>CFBundleName</key>

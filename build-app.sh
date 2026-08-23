@@ -3,7 +3,7 @@ set -euo pipefail
 
 cd "$(dirname "$0")"
 BUILD_DIR=".build-cache/app"
-APP_DIR="$BUILD_DIR/VoiceScribe.app"
+APP_DIR="$BUILD_DIR/SoundIn.app"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 
@@ -13,7 +13,7 @@ TMPDIR="$PWD/.build-cache/tmp" \
 swift build -c release --disable-sandbox \
   --cache-path .build-cache/swift-build \
   --manifest-cache local
-cp ".build/release/VoiceScribe" "$MACOS/VoiceScribe"
+cp ".build/release/VoiceScribe" "$MACOS/SoundIn"
 cp Info.plist "$CONTENTS/Info.plist"
 cp Resources/AppIcon.icns "$CONTENTS/Resources/AppIcon.icns"
 
