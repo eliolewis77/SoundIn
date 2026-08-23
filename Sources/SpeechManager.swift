@@ -259,6 +259,12 @@ private final class SegmentedAudioFileWriter: @unchecked Sendable {
     }
 
     private func resetLocked() {
+        // 收集本次会话产生的所有临时音频文件并删除——此前取消路径只清引用不删文件，
+        // 每次 Esc 取消都会在 /tmp 泄漏 full.wav + segment-*.wav。
+        var orphanedURLs: [URL] = completedSegments.map(\.url)
+        if let currentURL { orphanedURLs.append(currentURL) }
+        if let fullURL { orphanedURLs.append(fullURL) }
+
         segmentFile = nil
         fullAudioFile = nil
         recordingFormat = nil
@@ -273,6 +279,10 @@ private final class SegmentedAudioFileWriter: @unchecked Sendable {
         fullFrameCount = 0
         consecutiveSilentFrames = 0
         currentSegmentHasSpeech = false
+
+        for url in orphanedURLs {
+            try? FileManager.default.removeItem(at: url)
+        }
     }
 
     private static func audioURL(sessionID: UUID, name: String) -> URL {
@@ -620,6 +630,11 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
     var errorMessage: String?
     var lastPermissionError: VoiceInputPhase = .idle
 
+    /// 权限弹窗进行中：此时录音并未真正启动失败，调用方应保持会话挂起等待授权回调
+    private(set) var isAwaitingPermission = false
+    /// 权限申请结束（拒绝）后的异步结果上报；由热键路径注入以驱动 HUD/菜单栏状态
+    var permissionOutcomeHandler: ((VoiceInputPhase) -> Void)?
+
     /// 录音无法启动时的具体原因（nil = 可以启动）。供热键路径与 HUD 显示，
     /// 避免 canStartRecording 为 false 时静默失败。
     var permissionBlockedReason: String? {
@@ -739,12 +754,14 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         let provider = SpeechManager.shared.recognitionProvider
         let micStatus = AVCaptureDevice.authorizationStatus(for: .audio)
         HotkeyFileLog.shared.log("rec: start requested provider=\(provider == .api ? "api" : "local") mic=\(micStatus.rawValue)")
+        isAwaitingPermission = false
 
         if let reason = permissionBlockedReason {
             HotkeyFileLog.shared.log("rec: blocked — \(reason)")
         }
 
         if micStatus == .notDetermined {
+            isAwaitingPermission = true
             requestPermissions()
             return
         }
@@ -759,6 +776,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         if provider != .api {
             let speechStatus = SFSpeechRecognizer.authorizationStatus()
             if speechStatus == .notDetermined {
+                isAwaitingPermission = true
                 requestPermissions()
                 return
             }
@@ -775,6 +793,13 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             self.saveStatus = .idle // Ensure we start from idle
             applyPreferredInputDevice()
             try startRecording()
+            // 兜底复位：startRecording 内部存在「设置 errorMessage 后直接 return」的早退路径
+            // （如麦克风热插拔瞬间采样率为 0、locale 不可用）。这些路径不会走到各自的
+            // isStarting = false，若不复位，toggleRecording 的 guard !isStarting 会永久锁死录音入口。
+            if !isRecording {
+                isStarting = false
+                HotkeyFileLog.shared.log("rec: start aborted silently — isStarting reset")
+            }
             HotkeyFileLog.shared.log("rec: engine started ok (isRecording=\(isRecording))")
         } catch {
             HotkeyFileLog.shared.log("rec: start FAILED — \(error.localizedDescription)")
@@ -910,6 +935,10 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         currentSessionID = nil
         transcribedText = ""
         audioLevel = 0.0
+        // 非分段路径的整段 WAV 也一并清理（正常完成后该文件已被删，此处为取消/异常路径兜底）
+        if let url = recordedAudioURL {
+            try? FileManager.default.removeItem(at: url)
+        }
         recordedAudioURL = nil
         useSegmentedAPIRecording = false
         completedSpeechSegments.removeAll()
@@ -933,7 +962,11 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                         self.startRecordingSafe()
                     } else {
                         self.errorMessage = NSLocalizedString("speech_microphone_permission_error", comment: "")
+                        self.lastPermissionError = .permissionDenied(message: self.errorMessage ?? "麦克风权限未授权")
                         self.isStarting = false
+                        // 异步拒绝：此时同步检查早已结束，必须经 handler 上报，否则调用方永远收不到结果
+                        let phase = self.lastPermissionError
+                        self.permissionOutcomeHandler?(phase)
                     }
                 }
                 return
@@ -946,7 +979,10 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                         self.startRecordingSafe()
                     } else {
                         self.errorMessage = NSLocalizedString("speech_permission_error", comment: "")
+                        self.lastPermissionError = .permissionDenied(message: self.errorMessage ?? "语音识别权限未授权")
                         self.isStarting = false
+                        let phase = self.lastPermissionError
+                        self.permissionOutcomeHandler?(phase)
                     }
                 }
             }
@@ -1272,10 +1308,21 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             .sorted { $0.index < $1.index }
 
         var segmentTexts: [(Int, String)] = []
+        var failedSegmentNumbers: [Int] = []
         for segment in orderedSegments {
-            guard let task = segmentTranscriptionTasks[segment.index],
-                  let text = await task.value,
-                  !text.isEmpty else {
+            var text = await segmentTranscriptionTasks[segment.index]?.value
+            if text == nil || text?.isEmpty == true {
+                // 单段失败不再静默丢弃：先重试一次（此前任何一段网络失败都会导致该段文字无感消失）
+                HotkeyFileLog.shared.log("rec: segment[\(segment.index)] empty/failed — retrying once")
+                text = await transcribeSegment(
+                    segment,
+                    endpointURL: endpointURL,
+                    apiKey: apiKey,
+                    modelName: modelName
+                )
+            }
+            guard let text, !text.isEmpty else {
+                failedSegmentNumbers.append(segment.index + 1)
                 continue
             }
             segmentTexts.append((segment.index, text))
@@ -1285,7 +1332,15 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         completedSpeechSegments.removeAll()
         segmentTranscriptionTasks.removeAll()
 
-        return mergeSegmentTexts(segmentTexts.map(\.1))
+        let merged = mergeSegmentTexts(segmentTexts.map(\.1))
+        if failedSegmentNumbers.isEmpty {
+            return merged
+        }
+        // 重试后仍失败：插入用户可见的占位标记，绝不让缺段无感混入粘贴结果
+        HotkeyFileLog.shared.log("rec: segments failed after retry: \(failedSegmentNumbers)")
+        let numbers = failedSegmentNumbers.map(String.init).joined(separator: "、")
+        let marker = "［第 \(numbers) 段转写失败，请检查网络后重录］"
+        return merged.isEmpty ? marker : merged + marker
     }
 
     private func transcribeSegment(
@@ -1322,9 +1377,8 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                 modelName: modelName
             )
         } catch {
-            #if DEBUG
-            print("❌ Segment transcription failed[\(segment.index)]: \(error.localizedDescription)")
-            #endif
+            if Task.isCancelled { return nil }
+            HotkeyFileLog.shared.log("rec: segment[\(segment.index)] transcription failed — \(error.localizedDescription)")
             return nil
         }
     }

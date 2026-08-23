@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SoundIn · API 多配置档 设计稿</title>
+<style>
+  :root {
+    --bg: #f5f4f1; --card: #fff; --ink: #2c2c2a; --sub: #8a8a86;
+    --line: #e8e6e0; --green: #97c459; --g-deep: #6f9e3d;
+  }
+  * { margin:0; padding:0; box-sizing:border-box; }
+  body { font-family:-apple-system,"PingFang SC",sans-serif; background:var(--bg); color:var(--ink); padding:44px 24px 80px; }
+  .wrap { max-width:780px; margin:0 auto; }
+  h1 { font-size:22px; font-weight:600; margin-bottom:6px; }
+  .lead { color:var(--sub); font-size:14px; line-height:1.7; margin-bottom:36px; }
+  section { margin-bottom:42px; }
+  h2 { font-size:15px; font-weight:600; display:flex; align-items:center; gap:8px; margin-bottom:14px; }
+  h2 .num { width:20px; height:20px; border-radius:6px; background:var(--green); color:#fff; font-size:12px; display:inline-flex; align-items:center; justify-content:center; }
+
+  /* ── 设置卡片模拟 ── */
+  .settings {
+    background:var(--card); border:1px solid var(--line); border-radius:12px;
+    overflow:hidden; font-size:13.5px;
+  }
+  .s-title { padding:12px 16px 4px; font-size:12px; font-weight:600; color:var(--sub); }
+  .s-row {
+    display:flex; justify-content:space-between; align-items:center;
+    padding:11px 16px; border-bottom:1px solid var(--line); gap:12px;
+  }
+  .s-row:last-child { border-bottom:none; }
+  .s-row .label { font-weight:500; flex-shrink:0; }
+  .field {
+    flex:1; max-width:340px; background:#fafaf8; border:1px solid #dddad2; border-radius:6px;
+    padding:5px 10px; font-size:12.5px; color:var(--ink);
+    display:flex; align-items:center; gap:6px;
+  }
+  .field .ph { color:#b9b6ae; }
+  .field.secure .val { letter-spacing:2px; }
+  .picker {
+    background:#efeeea; border:1px solid #dddad2; border-radius:6px;
+    padding:3px 10px; font-size:12.5px; color:var(--ink);
+    display:inline-flex; align-items:center; gap:6px;
+  }
+  .picker::after { content:"▾"; font-size:10px; color:var(--sub); }
+  .picker b { font-weight:500; }
+  .btn {
+    background:#fff; border:1px solid #dddad2; border-radius:6px;
+    padding:4px 12px; font-size:12.5px; cursor:pointer;
+    box-shadow:0 1px 2px rgba(0,0,0,.05);
+  }
+  .btn.green { background:var(--green); border-color:var(--green); color:#fff; font-weight:500; }
+  .btn.danger { color:#c74a33; }
+  .btn-row { display:flex; gap:8px; align-items:center; }
+  .footer-note {
+    padding:10px 16px; font-size:12px; color:var(--sub);
+    background:#fafaf8; border-top:1px dashed var(--line); line-height:1.7;
+  }
+  .status-ok { color:var(--g-deep); font-size:12.5px; display:inline-flex; align-items:center; gap:4px; }
+
+  /* ── 菜单模拟 ── */
+  .menu-demo { display:flex; gap:28px; align-items:flex-start; }
+  .menu {
+    width: 240px; background: rgba(242,242,244,.96);
+    backdrop-filter: blur(20px);
+    border-radius: 12px; border: 1px solid rgba(0,0,0,.08);
+    box-shadow: 0 16px 48px rgba(0,0,0,.18);
+    padding: 5px; font-size: 13px;
+  }
+  .m-item {
+    padding: 6px 10px; border-radius: 6px; color: var(--ink);
+    display:flex; align-items:center; gap:8px; cursor:default;
+  }
+  .m-item:hover { background: var(--green); color:#fff; }
+  .m-item .txt { flex:1; }
+  .m-item .check { width:14px; color:var(--g-deep); }
+  .m-item.sub { padding-left:32px; font-size:12.5px; }
+  .m-sep { height:1px; background:rgba(0,0,0,.07); margin:5px 8px; }
+  .arrow { font-size:11px; color:#a5a29b; }
+
+  .note { font-size:12.5px; color:var(--sub); line-height:1.8; margin-top:14px; padding-left:16px; position:relative; }
+  .note::before { content:""; position:absolute; left:2px; top:8px; width:6px; height:6px; border-radius:50%; background:var(--green); }
+
+  .tag { display:inline-block; font-size:11px; padding:1px 8px; border-radius:99px; background:#eef4e3; color:var(--g-deep); vertical-align:1px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>API 多配置档</h1>
+  <p class="lead">识别引擎和文字优化的 OpenAI 兼容接口，支持保存多份配置（比如「硅基流动」「本地 whisper 服务」「OpenAI 官方」），随时切换用哪一份。</p>
+
+  <!-- ① 识别引擎 -->
+  <section>
+    <h2><span class="num">①</span>识别引擎设置页 · API 区块改造</h2>
+    <div class="settings">
+      <div class="s-title">OpenAI 兼容 API（语音转写）</div>
+      <div class="s-row">
+        <span class="label">接口配置</span>
+        <span class="picker"><b>硅基流动</b></span>
+      </div>
+      <div class="s-row">
+        <span class="label">Base URL</span>
+        <span class="field">https://api.siliconflow.cn/v1</span>
+      </div>
+      <div class="s-row">
+        <span class="label">API Key</span>
+        <span class="field secure"><span class="val">sk-••••••••••••3f8a</span></span>
+      </div>
+      <div class="s-row">
+        <span class="label">模型名称</span>
+        <span class="field">FunAudioLLM/SenseVoiceSmall</span>
+      </div>
+      <div class="s-row">
+        <span class="label"></span>
+        <span class="btn-row">
+          <span class="btn green">＋ 添加配置</span>
+          <span class="btn danger">删除当前配置</span>
+          <span class="btn">测试连接</span>
+          <span class="status-ok">✓ 连接正常 · 3 个模型可用</span>
+        </span>
+      </div>
+    </div>
+    <p class="note">「接口配置」下拉列出所有已存配置档。下方三个字段显示当前选中的档，<b>直接编辑即保存回该档</b>——不需要额外的"保存"按钮。</p>
+    <p class="note">「＋ 添加配置」弹出一个输入名称的小窗口（如「OpenAI 官方」），确认后新建一份空白配置并选中，填入字段即可。</p>
+  </section>
+
+  <!-- ② 文字优化 -->
+  <section>
+    <h2><span class="num">②</span>文字优化页 · 同样的结构</h2>
+    <div class="settings">
+      <div class="s-title">优化模型（OpenAI 兼容）</div>
+      <div class="s-row">
+        <span class="label">接口配置</span>
+        <span class="picker"><b>本地 Ollama</b></span>
+      </div>
+      <div class="s-row">
+        <span class="label">Base URL</span>
+        <span class="field">http://127.0.0.1:11434/v1</span>
+      </div>
+      <div class="s-row">
+        <span class="label">API Key</span>
+        <span class="field"><span class="ph">本地服务可不填</span></span>
+      </div>
+      <div class="s-row">
+        <span class="label">模型名称</span>
+        <span class="field">qwen3:8b</span>
+      </div>
+    </div>
+    <p class="note">复用<b>同一份配置档列表</b>，但选择互相独立：识别用「硅基流动」，润色用「本地 Ollama」，互不影响。Key 留空的配置档照样合法（本地服务场景）。</p>
+  </section>
+
+  <!-- ③ 菜单栏快捷切换 -->
+  <section>
+    <h2><span class="num">③</span>菜单栏快捷切换 <span class="tag">可选</span></h2>
+    <div class="menu-demo">
+      <div class="menu">
+        <div class="m-item"><span class="txt">开始听写</span><span class="arrow">⌥Space</span></div>
+        <div class="m-item"><span class="txt">设置…</span></div>
+        <div class="m-sep"></div>
+        <div class="m-item"><span class="txt">识别配置</span><span class="arrow">▶</span></div>
+        <div class="m-sep"></div>
+        <div class="m-item"><span class="txt">退出</span></div>
+      </div>
+      <div class="menu">
+        <div class="m-item sub"><span class="check">✓</span><span class="txt">硅基流动</span></div>
+        <div class="m-item sub"><span class="check"></span><span class="txt">本地 whisper</span></div>
+        <div class="m-item sub"><span class="check"></span><span class="txt">OpenAI 官方</span></div>
+      </div>
+      <div style="align-self:center; font-size:13px; line-height:2; color:var(--sub);">
+        右键菜单里加一个<br>
+        「识别配置」子菜单，<br>
+        不开设置页也能一键换接口。<br>
+        <b style="color:var(--ink)">不要这个就去掉，不影响其他部分。</b>
+      </div>
+    </div>
+  </section>
+
+  <!-- ④ 迁移与存储 -->
+  <section>
+    <h2><span class="num">④</span>升级迁移（无感）</h2>
+    <div class="settings">
+      <div class="footer-note">
+        首次启动新版时：如果检测到旧的单独 Base URL / Key / 模型设置，自动打包成一个名为「默认」的配置档，识别和润色的原选择保持不变。之后旧字段不再使用，统一走配置档。<br>
+        配置档以 JSON 存在 UserDefaults（与现状一致）；API Key 仍是明文存储，安全等级不降低也不提高。
+      </div>
+    </div>
+  </section>
+</div>
+</body>
+</html>

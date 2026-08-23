@@ -53,6 +53,9 @@ final class APIProfileStore: ObservableObject {
             engineSelectionID = loadSelection(key: Self.engineSelectionKey, validIn: profiles)
             polishSelectionID = loadSelection(key: Self.polishSelectionKey, validIn: profiles)
         } else {
+            if UserDefaults.standard.data(forKey: Self.profilesKey) != nil {
+                HotkeyFileLog.shared.log("profiles: stored JSON unreadable — falling back to legacy migration")
+            }
             profiles = Self.migrateLegacySettings()
             engineSelectionID = profiles.first?.id
             // 润色旧配置与识别不同 → 单独建档并选中；相同/为空 → 与识别共用第一档
@@ -62,10 +65,20 @@ final class APIProfileStore: ObservableObject {
                 polishSelectionID = profiles.first?.id
             }
             persistProfiles()
+            // 迁移完成即删除旧键：否则主数据将来损坏时，这里会把升级前的
+            // 旧 Base URL / Key 静默"复活"，用户拿到过期凭据且无从排查。
+            Self.removeLegacyKeys()
         }
         // 兜底：选中项失效（如手动改了存储）时指回第一档
         if engineSelectionID == nil { engineSelectionID = profiles.first?.id }
         if polishSelectionID == nil { polishSelectionID = profiles.first?.id }
+    }
+
+    /// 删除升级迁移来源的 6 个旧键（迁移只应发生一次）
+    private static func removeLegacyKeys() {
+        let d = UserDefaults.standard
+        ["vs.apiBaseURL", "vs.apiKey", "vs.apiModel",
+         "vs.polishBaseURL", "vs.polishAPIKey", "vs.polishModel"].forEach { d.removeObject(forKey: $0) }
     }
 
     /// 首次升级迁移：把旧的三个单独字段打包成「默认」档；

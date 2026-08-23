@@ -3,7 +3,7 @@ import Foundation
 /// 每日听写字数统计：按日累计成功输入的转写字符数（去除空白）。
 /// 数据仅存本机 UserDefaults（键 dictationStats.yyyyMMdd），自动清理 90 天前的旧数据。
 @MainActor
-final class DictationStats {
+final class DictationStats: ObservableObject {
     static let shared = DictationStats()
 
     private let prefix = "dictationStats."
@@ -20,6 +20,8 @@ final class DictationStats {
         defaults.set(defaults.integer(forKey: key) + count, forKey: key)
         cleanupOldEntriesIfNeeded()
         HotkeyFileLog.shared.log("stats: +\(count) chars, today=\(todayCount)")
+        // 统计页实时刷新：数字与热力图随每次成功输入更新
+        objectWillChange.send()
     }
 
     var todayCount: Int { count(for: Date()) }
