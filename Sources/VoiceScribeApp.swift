@@ -230,8 +230,6 @@ private struct SettingsView: View {
                 ForEach(HotkeyInputManager.TriggerMode.allCases, id: \.self) { mode in
                     Text(mode.displayName).tag(mode)
                 }
-            }
-
             if triggerMode == .hold {
                 Picker("确认等待", selection: Binding(
                     get: { holdThreshold },
@@ -256,6 +254,7 @@ private struct SettingsView: View {
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
+        }
         }
 
         Section {
