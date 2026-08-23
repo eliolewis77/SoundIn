@@ -520,10 +520,35 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         }
 
+        let first = await executeConnectionTest(request, baseURL: normalizedBase, model: cleanModel)
+        if first.result.isSuccess { return first.result }
+
+        // 应用启动后首次访问局域网地址时，macOS 可能尚未完成本地网络放行，
+        // 请求会以 -1009「似乎已断开与互联网的连接」失败；这次失败本身会触发放行，
+        // 因此对这类瞬时错误自动重试一次（间隔 0.8 秒），用户无感。
+        if first.isTransientNetworkFailure {
+            try? await Task.sleep(for: .milliseconds(800))
+            HotkeyFileLog.shared.log("conn-test: retry after transient network failure")
+            return (await executeConnectionTest(request, baseURL: normalizedBase, model: cleanModel)).result
+        }
+        return first.result
+    }
+
+    private static func transientCode(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .notConnectedToInternet, .networkConnectionLost, .cannotFindHost, .cannotConnectToHost:
+            return true
+        default:
+            return false
+        }
+    }
+
+    private func executeConnectionTest(_ request: URLRequest, baseURL normalizedBase: String, model cleanModel: String) async -> (result: ConnectionTestResult, isTransientNetworkFailure: Bool) {
         do {
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse else {
-                return .failed(message: "无效的服务端响应")
+                return (ConnectionTestResult.failed(message: "无效的服务端响应"), false)
             }
             switch http.statusCode {
             case 200:
@@ -532,26 +557,27 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                    let list = json["data"] as? [[String: Any]] {
                     let ids = list.compactMap { $0["id"] as? String }
                     if ids.isEmpty {
-                        return .ok(detail: "连接成功（服务端未返回模型列表）")
+                        return (ConnectionTestResult.ok(detail: "连接成功（服务端未返回模型列表）"), false)
                     }
                     if !cleanModel.isEmpty && ids.contains(cleanModel) {
-                        return .ok(detail: "连接成功，模型「\(cleanModel)」已在服务端列表中")
+                        return (ConnectionTestResult.ok(detail: "连接成功，模型「\(cleanModel)」已在服务端列表中"), false)
                     }
                     let preview = ids.prefix(5).joined(separator: ", ")
                     let suffix = ids.count > 5 ? " 等 \(ids.count) 个" : ""
-                    return .ok(detail: "连接成功；服务端未列出「\(cleanModel)」，现有：\(preview)\(suffix)")
+                    return (ConnectionTestResult.ok(detail: "连接成功；服务端未列出「\(cleanModel)」，现有：\(preview)\(suffix)"), false)
                 }
-                return .ok(detail: "连接成功")
+                return (ConnectionTestResult.ok(detail: "连接成功"), false)
             case 401, 403:
-                return .failed(message: "鉴权失败（HTTP \(http.statusCode)），请检查 API Key")
+                return (ConnectionTestResult.failed(message: "鉴权失败（HTTP \(http.statusCode)），请检查 API Key"), false)
             case 404:
-                return .failed(message: "接口路径不存在（404），请确认 Base URL 是否以 /v1 结尾")
+                return (ConnectionTestResult.failed(message: "接口路径不存在（404），请确认 Base URL 是否以 /v1 结尾"), false)
             default:
-                return .failed(message: "服务端返回 HTTP \(http.statusCode)")
+                return (ConnectionTestResult.failed(message: "服务端返回 HTTP \(http.statusCode)"), false)
             }
         } catch {
             HotkeyFileLog.shared.log("conn-test: failed \(normalizedBase) — \(error.localizedDescription)")
-            return .failed(message: "无法连接：\(error.localizedDescription)")
+            let result = ConnectionTestResult.failed(message: "无法连接：\(error.localizedDescription)")
+            return (result, Self.transientCode(error))
         }
     }
     /// 本次录音会话的运行时状态（不持久化），由开始录音时根据 provider 与用户偏好计算
