@@ -289,22 +289,36 @@ final class HotkeyInputManager {
     /// 开始录音时目标应用是否有选中文本（驱动 HUD 的"将替换选中的内容"提示）
     private(set) var willReplaceSelection = false
 
-    /// 通过辅助功能 API 检测焦点元素是否有非空选区
-    static func detectSelectedText() -> Bool {
-        guard AXIsProcessTrusted() else { return false }
+    /// 获取当前焦点应用的焦点 UI 元素。优先走调用方传入的前台应用 PID（主线程读取，
+    /// 后台线程读 NSWorkspace.frontmostApplication 不可靠），失败再退回 systemWide。
+    /// AX 查询带 0.3s 消息超时，即使应用无响应也不会长时间阻塞。
+    nonisolated static func focusedAXElement(frontmostPID: pid_t? = nil) -> AXUIElement? {
+        guard AXIsProcessTrusted() else { return nil }
+        if let frontmostPID {
+            let appElement = AXUIElementCreateApplication(frontmostPID)
+            AXUIElementSetMessagingTimeout(appElement, 0.3)
+            var focused: CFTypeRef?
+            if AXUIElementCopyAttributeValue(appElement, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
+               let element = focused {
+                return element as! AXUIElement
+            }
+        }
         let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 0.3)
         var focused: CFTypeRef?
         guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
-              let element = focused else { return false }
-        let axElement = element as! AXUIElement
+              let element = focused else { return nil }
+        return element as! AXUIElement
+    }
 
+    /// 通过辅助功能 API 检测焦点元素是否有非空选区。纯 AX 查询，可在后台线程执行。
+    nonisolated static func detectSelectedText(frontmostPID: pid_t? = nil) -> Bool {
+        guard AXIsProcessTrusted() else { return false }
         // 优先读选中文本本身
-        var value: CFTypeRef?
-        if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextAttribute as CFString, &value) == .success,
-           let text = value as? String, !text.isEmpty {
-            return true
-        }
+        if focusedSelectedText(frontmostPID: frontmostPID) != nil { return true }
         // 部分应用不暴露 SelectedText，退而检查选中范围长度
+        guard let axElement = focusedAXElement(frontmostPID: frontmostPID) else { return false }
+        var value: CFTypeRef?
         if AXUIElementCopyAttributeValue(axElement, kAXSelectedTextRangeAttribute as CFString, &value) == .success,
            let axValue = value,
            CFGetTypeID(axValue) == AXValueGetTypeID() {
@@ -314,6 +328,21 @@ final class HotkeyInputManager {
             }
         }
         return false
+    }
+
+    /// 读取焦点元素的选中文本（无选中文本 / 无辅助功能权限时返回 nil）。非主线程安全。
+    nonisolated static func focusedSelectedText(frontmostPID: pid_t? = nil) -> String? {
+        guard AXIsProcessTrusted() else { return nil }
+        guard let axElement = focusedAXElement(frontmostPID: frontmostPID) else { return nil }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axElement, kAXSelectedTextAttribute as CFString, &value) == .success,
+              let text = value as? String, !text.isEmpty else { return nil }
+        return text
+    }
+
+    /// 句子终止标点（句号/问号/叹号/省略号）：替换场景中句尾标点跟随原选中文本
+    private static func isSentenceTerminator(_ c: Character) -> Bool {
+        "。！？!?…".contains(c)
     }
 
     func start() {
@@ -571,9 +600,16 @@ final class HotkeyInputManager {
         sessionID = newSessionID
         pasteboardBaseline = UUID()
         isActive = true
-        // 检测目标应用选区：有选中 → HUD 提示"将替换选中的内容"，松手 ⌘V 原生覆盖
-        willReplaceSelection = Self.detectSelectedText()
-        VoiceInputHUDManager.shared.willReplaceSelection = willReplaceSelection
+        // 检测目标应用选区：有选中 → HUD 提示"将替换选中的内容"，松手 ⌘V 原生覆盖。
+        // AX 查询放主线程 Task 执行（带 0.3s 超时），不阻塞热键响应路径，也不受后台
+        // 线程 AX 亲和问题影响。
+        Task { @MainActor [weak self] in
+            let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            let hasSelection = Self.detectSelectedText(frontmostPID: pid)
+            guard let self, self.sessionID == newSessionID else { return }
+            self.willReplaceSelection = hasSelection
+            VoiceInputHUDManager.shared.willReplaceSelection = hasSelection
+        }
         SpeechManager.shared.useSegmentedAPIRecording =
             SpeechManager.shared.recognitionProvider == .api
         // 权限申请是异步的：拒绝结果经此回调上报（同步检查早已结束）
@@ -666,6 +702,32 @@ final class HotkeyInputManager {
                 trimmedText = await SpeechManager.shared.polishTranscription(trimmedText)
             }
 
+            // 替换选中文本场景：句尾标点跟随原选中文本。
+            // 识别/润色模型常在句尾自动补"。"；替换时若原句以终止标点（。！？…）结尾，
+            // 新内容也以同样的标点结尾（保持句子结构）；原句无终止标点则去掉模型自动
+            // 加的句号。AX 查询在主线程执行（带 0.3s 超时），后台线程读取不可靠。
+            let frontmostPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            let selectedText = Self.focusedSelectedText(frontmostPID: frontmostPID)
+            if let selectedText, !selectedText.isEmpty {
+                if let last = selectedText.last, Self.isSentenceTerminator(last) {
+                    // 原句以终止标点结尾：新内容去掉末尾标点后补同样的标点
+                    var base = trimmedText
+                    while let b = base.last, Self.isSentenceTerminator(b) {
+                        base = String(base.dropLast())
+                    }
+                    trimmedText = base + String(last)
+                    HotkeyFileLog.shared.log("paste: selectedEnds=\(last) matched punctuation")
+                } else {
+                    // 原句无终止标点：去掉模型自动加的句号
+                    if trimmedText.hasSuffix("。") || trimmedText.hasSuffix(".") {
+                        trimmedText = String(trimmedText.dropLast())
+                        HotkeyFileLog.shared.log("paste: selected has no terminator — stripped trailing period")
+                    }
+                }
+            } else {
+                HotkeyFileLog.shared.log("paste: no AX selection readable — punctuation kept as-is")
+            }
+
             // 辅助功能权限是模拟 ⌘V 粘贴的前提；缺失时提前给出指引而不是先展示成功
             let axTrusted = AXIsProcessTrusted()
             HotkeyFileLog.shared.log("paste: ready length=\(trimmedText.count) axTrusted=\(axTrusted)")
@@ -702,10 +764,37 @@ final class HotkeyInputManager {
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
         guard sendPasteShortcut() else { return false }
-        try? await Task.sleep(for: .milliseconds(320))
+        // 不再固定 sleep 320ms：等待目标应用消费剪贴板，慢应用也能等到粘贴完成再恢复剪贴板
+        await waitForPasteEffect(expectedText: text)
 
         restorePasteboard(previousItems: previousItems, baseline: currentBaseline)
         return true
+    }
+
+    /// 等待目标应用完成粘贴。
+    /// 能检测时（AX 可用且应用暴露选中文本）轮询选中文本包含转写内容即提前返回，
+    /// 慢应用最多等到 1.5s；无法检测时（无 AX 权限 / 应用不暴露选中文本，如光标处插入）
+    /// 320ms 兜底，时序与旧实现一致，不引入额外延迟。
+    private func waitForPasteEffect(expectedText: String) async {
+        guard AXIsProcessTrusted() else {
+            try? await Task.sleep(for: .milliseconds(320))
+            return
+        }
+        let fallbackDeadline = Date().addingTimeInterval(0.32)
+        let hardDeadline = Date().addingTimeInterval(1.5)
+        var sawSelection = false
+        while Date() < hardDeadline {
+            try? await Task.sleep(for: .milliseconds(80))
+            let selected = Self.focusedSelectedText()
+            if let selected, !selected.isEmpty {
+                sawSelection = true
+                if selected.contains(expectedText) || expectedText.contains(selected) {
+                    return // 粘贴内容已进入目标应用
+                }
+            } else if Date() >= fallbackDeadline, !sawSelection {
+                return // 应用不暴露选中文本，按旧时序兜底
+            }
+        }
     }
 
     private func restorePasteboard(previousItems: [[NSPasteboard.PasteboardType: Data]], baseline: UUID) {
