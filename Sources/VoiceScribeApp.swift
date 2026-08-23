@@ -39,6 +39,10 @@ struct VoiceScribeApp: App {
                 Button("退出") { NSApp.terminate(nil) }
             }
             .padding(8)
+            // 菜单栏此前从未订阅 voicePhaseChanged，图标与状态文字永远停留在初始值
+            .onReceive(NotificationCenter.default.publisher(for: .voicePhaseChanged)) { _ in
+                phase = VoiceScribeApp.currentPhase
+            }
         } label: {
             // 空闲时显示品牌标识（三根声波条 + 细光标），其余状态保留 SF Symbol 以传达实时信息
             if case .idle = phase {
@@ -180,6 +184,7 @@ private struct SettingsView: View {
     @Bindable var speech = SpeechManager.shared
     @ObservedObject var history = InputHistory.shared
     @ObservedObject var profileStore = APIProfileStore.shared
+    @ObservedObject var stats = DictationStats.shared
     @State private var selectedPage: Page = .general
     @State private var isAddingProfile = false
     @State private var newProfileName = ""
@@ -674,15 +679,15 @@ private struct SettingsView: View {
     private var statsPage: some View {
         Section("听写统计") {
             HStack(spacing: 10) {
-                statBox(value: DictationStats.shared.todayCount, label: "今日", highlight: true)
-                statBox(value: DictationStats.shared.weekCount, label: "本周")
-                statBox(value: DictationStats.shared.totalCount, label: "累计（保留期内）")
+                statBox(value: stats.todayCount, label: "今日", highlight: true)
+                statBox(value: stats.weekCount, label: "本周")
+                statBox(value: stats.totalCount, label: "累计（保留期内）")
             }
             .padding(.vertical, 4)
         }
 
         Section("最近 13 周") {
-            DictationHeatmapView(cells: DictationStats.shared.heatmapCells(weeks: 13))
+            DictationHeatmapView(cells: stats.heatmapCells(weeks: 13))
         }
 
         Section("最近输入") {

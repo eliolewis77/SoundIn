@@ -92,8 +92,30 @@ final class VoiceInputHUDManager {
             // 失败信息可能较长，截断以适配胶囊宽度
             message = newMessage.count > 14 ? String(newMessage.prefix(14)) + "…" : newMessage
         }
-        guard let window = hudWindow, window.isVisible else { return }
+        guard let window = hudWindow, window.isVisible else {
+            // 失败/取消提示若发生在窗口从未显示时（典型：权限拒绝、启动失败），
+            // 此前会在这里被直接吞掉，用户得不到任何反馈。这类状态先把窗口亮出来。
+            if isFailureLikePhase(newPhase) {
+                let failureWindow = ensureWindow()
+                positionAtBottomCenter(failureWindow)
+                failureWindow.alphaValue = 0
+                failureWindow.makeKeyAndOrderFront(nil)
+                NSAnimationContext.runAnimationGroup { context in
+                    context.duration = 0.16
+                    context.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                    failureWindow.animator().alphaValue = 1
+                }
+            }
+            return
+        }
         positionAtBottomCenter(window)
+    }
+
+    private func isFailureLikePhase(_ phase: VoiceInputHUDPhase) -> Bool {
+        switch phase {
+        case .failure, .cancelled: return true
+        default: return false
+        }
     }
 
     private func hide(after delay: TimeInterval) {

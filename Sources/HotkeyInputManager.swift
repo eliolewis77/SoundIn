@@ -548,10 +548,23 @@ final class HotkeyInputManager {
         VoiceInputHUDManager.shared.willReplaceSelection = willReplaceSelection
         SpeechManager.shared.useSegmentedAPIRecording =
             SpeechManager.shared.recognitionProvider == .api
+        // 权限申请是异步的：拒绝结果经此回调上报（同步检查早已结束）
+        SpeechManager.shared.permissionOutcomeHandler = { [weak self] phase in
+            guard let self, self.sessionID == newSessionID else { return }
+            self.isActive = false
+            self.sessionID = nil
+            self.timeoutTask?.cancel()
+            self.timeoutTask = nil
+            self.onStateChange?(phase)
+        }
         SpeechManager.shared.startRecordingSafe()
         onStateChange?(.recording)
 
-        if let permissionMessage = SpeechManager.shared.errorMessage {
+        if SpeechManager.shared.isAwaitingPermission {
+            // 权限弹窗进行中：不是启动失败。保持 isActive/sessionID，
+            // 授权后回调会重新 startRecordingSafe 继续本次会话；拒绝则由 handler 上报。
+            HotkeyFileLog.shared.log("rec: awaiting permission prompt — session kept alive")
+        } else if let permissionMessage = SpeechManager.shared.errorMessage {
             isActive = false
             sessionID = nil
             timeoutTask?.cancel()
