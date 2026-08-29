@@ -106,12 +106,13 @@ final class HotkeyInputManager {
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var isShortcutHeld = false
+    private var isHoldActive = false
     private var isActive = false
     private var isFinishing = false
     private var sessionID: UUID?
     private var timeoutTask: Task<Void, Never>?
     private var longPressTask: Task<Void, Never>?
-    private var hotKeyRef: EventHotKeyRef?
+    private var hotKeyRefs: [UInt32: EventHotKeyRef] = [:]
     private var hotKeyHandler: EventHandlerRef?
     private var isCaptureMode = false
     static let defaultShortcut = Shortcut(
@@ -120,32 +121,18 @@ final class HotkeyInputManager {
             .intersection(.deviceIndependentFlagsMask).rawValue
     )
 
-    var shortcut: Shortcut = loadShortcut() {
-        didSet {
-            saveShortcut()
-            registerCarbonHotKey()
-        }
+    /// 两块独立触发：单击切换 + 长按说话，两个快捷键同时生效
+    enum TriggerKind: String { case click, hold }
+    enum CaptureTarget: String { case click, hold }
+
+    var clickShortcut: Shortcut = loadClickShortcut() {
+        didSet { saveClickShortcut(); registerCarbonHotKey() }
     }
-
-    enum TriggerMode: String, Codable, CaseIterable {
-        case toggle
-        case hold
-
-        var displayName: String {
-            switch self {
-            case .toggle: "单击切换"
-            case .hold: "长按说话"
-            }
-        }
+    var holdShortcut: Shortcut = loadHoldShortcut() {
+        didSet { saveHoldShortcut(); registerCarbonHotKey() }
     }
 
     static let defaultHoldThreshold: TimeInterval = 0.7
-
-    var triggerMode: TriggerMode = loadTriggerMode() {
-        didSet {
-            UserDefaults.standard.set(triggerMode.rawValue, forKey: "voiceInputTriggerMode")
-        }
-    }
 
     var holdThreshold: TimeInterval = (UserDefaults.standard.object(forKey: "voiceInputHoldThreshold") as? Double) ?? defaultHoldThreshold {
         didSet {
@@ -383,16 +370,7 @@ final class HotkeyInputManager {
     private func registerCarbonHotKey() {
         unregisterCarbonHotKey()
 
-        // Carbon 无法注册"纯修饰键热键"（会把修饰键本身拦截掉、破坏正常输入），
-        // 纯修饰键热键完全依赖 NSEvent 的 flagsChanged 监听
-        if shortcut.isModifierOnly {
-            lastRegistrationError = nil
-            HotkeyFileLog.shared.log("skip carbon register (modifier-only: \(self.shortcut.displayText))")
-            logger.notice("skip carbon register (modifier-only)")
-            return
-        }
-
-        // 同时监听按下与释放：长按说话模式在 Carbon 路径下也需要 keyUp 才能停止录音
+        // 同时监听按下与释放：长按说话在 Carbon 路径下也需要 keyUp 才能停止录音
         var eventSpecs = [
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyPressed)),
             EventTypeSpec(eventClass: OSType(kEventClassKeyboard), eventKind: UInt32(kEventHotKeyReleased))
@@ -413,12 +391,14 @@ final class HotkeyInputManager {
                 )
                 guard result == noErr, keyCode.signature == OSType(0x5653484B) else { return noErr } // VHK
 
+                // id=1 → 单击触发；id=2 → 长按触发
+                let kind: TriggerKind = keyCode.id == 2 ? .hold : .click
                 let isRelease = GetEventKind(event) == UInt32(kEventHotKeyReleased)
                 Task { @MainActor in
                     if isRelease {
-                        await HotkeyInputManager.shared.handleHotKeyRelease()
+                        await HotkeyInputManager.shared.handleHotKeyRelease(kind: kind)
                     } else {
-                        await HotkeyInputManager.shared.handleTrigger()
+                        await HotkeyInputManager.shared.handleTrigger(kind: kind)
                     }
                 }
                 return noErr
@@ -433,6 +413,17 @@ final class HotkeyInputManager {
             return
         }
 
+        registerOneCarbonHotKey(id: 1, shortcut: clickShortcut, label: "click")
+        registerOneCarbonHotKey(id: 2, shortcut: holdShortcut, label: "hold")
+    }
+
+    /// 注册单个 Carbon 热键。纯修饰键热键无法走 Carbon（会拦截修饰键本身），交给 NSEvent 的 flagsChanged 监听。
+    private func registerOneCarbonHotKey(id: UInt32, shortcut: Shortcut, label: String) {
+        guard !shortcut.isModifierOnly else {
+            HotkeyFileLog.shared.log("skip carbon register (modifier-only: \(shortcut.displayText))")
+            return
+        }
+
         var carbonModifiers: UInt32 = 0
         if shortcut.modifiers.contains(.command) { carbonModifiers |= UInt32(cmdKey) }
         if shortcut.modifiers.contains(.option) { carbonModifiers |= UInt32(optionKey) }
@@ -443,57 +434,102 @@ final class HotkeyInputManager {
         let registerStatus = RegisterEventHotKey(
             UInt32(shortcut.keyCode),
             carbonModifiers,
-            EventHotKeyID(signature: OSType(0x5653484B), id: 1),
+            EventHotKeyID(signature: OSType(0x5653484B), id: id),
             GetApplicationEventTarget(),
             0,
             &ref
         )
         if registerStatus == noErr {
-            hotKeyRef = ref
+            hotKeyRefs[id] = ref
             lastRegistrationError = nil
-            logger.debug("hotkey registered: \(self.shortcut.displayText, privacy: .public)")
-            HotkeyFileLog.shared.log("hotkey registered ok: \(self.shortcut.displayText)")
+            logger.debug("hotkey registered (\(label)): \(shortcut.displayText, privacy: .public)")
+            HotkeyFileLog.shared.log("hotkey registered ok (\(label)): \(shortcut.displayText)")
         } else {
             // 组合键被系统或其他应用占用时会注册失败——必须暴露给用户而不是静默吞掉
             lastRegistrationError = "「\(shortcut.displayText)」注册失败，可能已被系统或其他应用占用，请换一个组合键"
-            hotKeyRef = nil
-            logger.error("RegisterEventHotKey failed (\(registerStatus, privacy: .public)) for \(self.shortcut.displayText, privacy: .public)")
-            HotkeyFileLog.shared.log("hotkey register FAILED status=\(registerStatus) for \(self.shortcut.displayText)")
+            logger.error("RegisterEventHotKey failed (\(registerStatus, privacy: .public)) for \(shortcut.displayText, privacy: .public)")
+            HotkeyFileLog.shared.log("hotkey register FAILED (\(label)) status=\(registerStatus) for \(shortcut.displayText)")
         }
     }
 
     private func unregisterCarbonHotKey() {
-        if let hotKeyRef { UnregisterEventHotKey(hotKeyRef) }
+        for (_, ref) in hotKeyRefs {
+            UnregisterEventHotKey(ref)
+        }
+        hotKeyRefs.removeAll()
         if let hotKeyHandler { RemoveEventHandler(hotKeyHandler) }
-        hotKeyRef = nil
         hotKeyHandler = nil
     }
 
-    fileprivate func handleTrigger() async {
-        logger.notice("hotkey pressed (captureMode=\(self.isCaptureMode, privacy: .public))")
-        HotkeyFileLog.shared.log("hotkey pressed (captureMode=\(self.isCaptureMode))")
+    fileprivate func handleTrigger(kind: TriggerKind) async {
+        logger.notice("hotkey pressed (captureMode=\(self.isCaptureMode, privacy: .public), kind=\(kind.rawValue))")
+        HotkeyFileLog.shared.log("hotkey pressed (captureMode=\(self.isCaptureMode), kind=\(kind.rawValue))")
         guard !isCaptureMode else { return }
-        if isActive { stop() } else { startRecording() }
+        switch kind {
+        case .click:
+            if isActive { stop() } else { startRecording() }
+        case .hold:
+            press(.hold)
+        }
     }
 
-    /// Carbon 路径的 keyUp：长按说话模式下松开快捷键要停止录音
-    fileprivate func handleHotKeyRelease() async {
-        logger.notice("hotkey released (active=\(self.isActive, privacy: .public))")
-        HotkeyFileLog.shared.log("hotkey released (active=\(self.isActive))")
-        guard !isCaptureMode, triggerMode == .hold, isActive else { return }
-        stop()
+    /// Carbon 路径的 keyUp：长按触发在 Carbon 路径下也需要 keyUp 才能停止录音
+    fileprivate func handleHotKeyRelease(kind: TriggerKind) async {
+        logger.notice("hotkey released (active=\(self.isActive, privacy: .public), kind=\(kind.rawValue))")
+        HotkeyFileLog.shared.log("hotkey released (active=\(self.isActive), kind=\(kind.rawValue))")
+        guard !isCaptureMode else { return }
+        if kind == .hold { release(.hold) }
     }
 
-    var displayShortcut: String { shortcut.displayText }
+    // MARK: - 触发分派（单击切换 / 长按说话）
 
-    /// 纯修饰键手势是否已完整按下（用于纯修饰键热键的触发判定）
-    private var modifierGestureArmed = false
+    private func press(_ kind: TriggerKind) {
+        switch kind {
+        case .click:
+            if isActive { stop() } else { startRecording() }
+        case .hold:
+            guard !isShortcutHeld else { return }
+            isShortcutHeld = true
+            longPressTask?.cancel()
+            longPressTask = Task { [weak self] in
+                let threshold = self?.holdThreshold ?? Self.defaultHoldThreshold
+                try? await Task.sleep(for: .milliseconds(Int(threshold * 1000)))
+                guard let self, !Task.isCancelled, self.isShortcutHeld, !self.isActive else { return }
+                guard SpeechManager.shared.canStartRecording else {
+                    self.onStateChange?(SpeechManager.shared.lastPermissionError)
+                    self.isShortcutHeld = false
+                    return
+                }
+                self.startRecording()
+                self.isHoldActive = true
+            }
+        }
+    }
+
+    private func release(_ kind: TriggerKind) {
+        switch kind {
+        case .click:
+            break
+        case .hold:
+            if isActive, isHoldActive { stop() }
+            longPressTask?.cancel()
+            longPressTask = nil
+            isShortcutHeld = false
+            isHoldActive = false
+        }
+    }
+
+    var displayShortcut: String { clickShortcut.displayText }
+
+    /// 纯修饰键手势是否已完整按下（单击 / 长按各自记录状态）
+    private var clickModifierArmed = false
+    private var holdModifierArmed = false
 
     @discardableResult
     private func handleKeyEvent(_ event: NSEvent) -> Bool {
         guard !Self.isShortcutCaptureActive else { return false }
 
-        // ── 录音中按 Esc：取消本次语音输入（长按 / 单击模式均生效）──
+        // ── 录音中按 Esc：取消本次语音输入（两种模式均生效）──
         if isActive, event.type == .keyDown,
            event.keyCode == UInt16(kVK_Escape), !event.isARepeat {
             cancelRecording()
@@ -501,93 +537,75 @@ final class HotkeyInputManager {
         }
 
         // ── 纯修饰键热键：监听 flagsChanged，组合完整按下时触发、全部松开时结束 ──
-        if shortcut.isModifierOnly {
-            if event.type != .flagsChanged {
-                // 按了任何普通按键都打断修饰键手势（避免 ⌘C 之类误触发）
-                modifierGestureArmed = false
-                return false
-            }
-            let mods = event.modifierFlags
-                .intersection(.deviceIndependentFlagsMask)
-                .intersection(Shortcut.realModifierKeys)
-            if mods.isEmpty {
-                // 全部松开：单击模式=切换开关；长按模式=停止录音
-                if modifierGestureArmed, isActive {
-                    stop()
-                }
-                modifierGestureArmed = false
-            } else if mods == shortcut.modifiers.intersection(.deviceIndependentFlagsMask) {
-                if !modifierGestureArmed {
-                    modifierGestureArmed = true
-                    HotkeyFileLog.shared.log("hotkey (modifier-only) armed")
-                    switch triggerMode {
-                    case .toggle:
-                        break // 等松开时再切换
-                    case .hold:
-                        startRecording()
-                    }
-                }
-            } else {
-                modifierGestureArmed = false
-            }
+        if event.type == .flagsChanged {
+            handleModifierGesture(event, shortcut: clickShortcut, armed: &clickModifierArmed, kind: .click)
+            handleModifierGesture(event, shortcut: holdShortcut, armed: &holdModifierArmed, kind: .hold)
             return false // 不吞掉修饰键事件，避免影响正常输入
         }
 
-        guard shortcut.matches(event), !event.isARepeat else { return false }
+        guard !event.isARepeat else { return false }
 
-        switch triggerMode {
-        case .toggle:
-            guard event.type == .keyDown else { return true }
-            if isActive {
-                stop()
-            } else {
-                startRecording()
-            }
-
-        case .hold:
-            if event.type == .keyDown {
-                guard !isShortcutHeld else { break }
-                isShortcutHeld = true
-                longPressTask?.cancel()
-                longPressTask = Task { [weak self] in
-                    let threshold = self?.holdThreshold ?? Self.defaultHoldThreshold
-                    try? await Task.sleep(for: .milliseconds(Int(threshold * 1000)))
-                    guard let self, !Task.isCancelled, self.isShortcutHeld, !self.isActive else { return }
-                    guard SpeechManager.shared.canStartRecording else {
-                        self.onStateChange?(SpeechManager.shared.lastPermissionError)
-                        self.isShortcutHeld = false
-                        return
-                    }
-                    self.startRecording()
-                }
-            } else if event.type == .keyUp {
-                if isActive {
-                    stop()
-                } else {
-                    longPressTask?.cancel()
-                    longPressTask = nil
-                    isShortcutHeld = false
-                }
-            }
+        if clickShortcut.matches(event) {
+            if event.type == .keyDown { press(.click) }
+            return true
         }
-        return true
+        if holdShortcut.matches(event) {
+            if event.type == .keyDown { press(.hold) }
+            else if event.type == .keyUp { release(.hold) }
+            return true
+        }
+        return false
     }
 
-    private static func loadTriggerMode() -> TriggerMode {
-        TriggerMode(rawValue: UserDefaults.standard.string(forKey: "voiceInputTriggerMode") ?? "") ?? .toggle
+    /// 纯修饰键热键的按下/松开判定（单击 = 松开时切换；长按 = 按下即开始、松开即停）
+    private func handleModifierGesture(_ event: NSEvent, shortcut: Shortcut, armed: inout Bool, kind: TriggerKind) {
+        guard shortcut.isModifierOnly else { armed = false; return }
+        let mods = event.modifierFlags
+            .intersection(.deviceIndependentFlagsMask)
+            .intersection(Shortcut.realModifierKeys)
+        if mods.isEmpty {
+            if armed {
+                if kind == .click {
+                    if isActive { stop() } else { startRecording() }
+                } else {
+                    release(.hold)
+                }
+            }
+            armed = false
+        } else if mods == shortcut.modifiers.intersection(.deviceIndependentFlagsMask) {
+            if !armed {
+                armed = true
+                HotkeyFileLog.shared.log("hotkey (modifier-only) armed (\(kind.rawValue))")
+                if kind == .hold { press(.hold) }
+                // 单击：等松开时再切换（上面的 mods.isEmpty 分支处理）
+            }
+        } else {
+            armed = false
+        }
     }
 
-    private static func loadShortcut() -> Shortcut {
-        guard let data = UserDefaults.standard.data(forKey: "voiceInputShortcut"),
-              let shortcut = try? JSONDecoder().decode(Shortcut.self, from: data) else {
+    private static func loadClickShortcut() -> Shortcut {
+        guard let data = UserDefaults.standard.data(forKey: "voiceInputClickShortcut"),
+              let s = try? JSONDecoder().decode(Shortcut.self, from: data) else {
             return defaultShortcut
         }
-        return shortcut
+        return s
     }
-
-    private func saveShortcut() {
-        if let data = try? JSONEncoder().encode(shortcut) {
-            UserDefaults.standard.set(data, forKey: "voiceInputShortcut")
+    private func saveClickShortcut() {
+        if let data = try? JSONEncoder().encode(clickShortcut) {
+            UserDefaults.standard.set(data, forKey: "voiceInputClickShortcut")
+        }
+    }
+    private static func loadHoldShortcut() -> Shortcut {
+        guard let data = UserDefaults.standard.data(forKey: "voiceInputHoldShortcut"),
+              let s = try? JSONDecoder().decode(Shortcut.self, from: data) else {
+            return defaultShortcut
+        }
+        return s
+    }
+    private func saveHoldShortcut() {
+        if let data = try? JSONEncoder().encode(holdShortcut) {
+            UserDefaults.standard.set(data, forKey: "voiceInputHoldShortcut")
         }
     }
 
@@ -677,6 +695,7 @@ final class HotkeyInputManager {
         HotkeyFileLog.shared.log("rec: cancelled by Esc (session=\(currentSessionID.uuidString))")
         isActive = false
         isShortcutHeld = false
+        isHoldActive = false
         isFinishing = false
         timeoutTask?.cancel()
         timeoutTask = nil
@@ -692,6 +711,7 @@ final class HotkeyInputManager {
 
         isActive = false
         isShortcutHeld = false
+        isHoldActive = false
         isFinishing = true
         timeoutTask?.cancel()
         timeoutTask = nil
