@@ -1,0 +1,90 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>触发方式 · 两块设置 · 设计稿</title>
+<style>
+  :root{
+    --bg:#f5f5f7; --panel:#ffffff; --line:#e3e3e6; --text:#1d1d1f;
+    --sub:#86868b; --accent:#0a84ff; --accent-soft:#e8f1ff;
+    --chip:#f0f0f3;
+  }
+  *{box-sizing:border-box;font-family:-apple-system,BlinkMacSystemFont,"SF Pro Text","PingFang SC","Microsoft YaHei",sans-serif;}
+  body{margin:0;background:var(--bg);color:var(--text);display:flex;justify-content:center;padding:40px 16px;}
+  .window{width:600px;background:var(--panel);border-radius:14px;box-shadow:0 8px 30px rgba(0,0,0,.08);overflow:hidden;border:1px solid var(--line);}
+  .titlebar{height:44px;display:flex;align-items:center;padding:0 16px;border-bottom:1px solid var(--line);font-size:13px;color:var(--sub);}
+  .dot{width:11px;height:11px;border-radius:50%;margin-right:7px;}
+  .dot.r{background:#ff5f57;} .dot.y{background:#febc2e;} .dot.g{background:#28c840;}
+  .body{padding:22px 24px 26px;}
+  h2{font-size:15px;font-weight:600;margin:0 0 4px;}
+  .block{border:1px solid var(--line);border-radius:10px;margin-top:14px;overflow:hidden;}
+  .block-title{font-size:12px;font-weight:600;color:var(--accent);padding:10px 16px 0;}
+  .row{display:flex;align-items:center;justify-content:space-between;padding:12px 16px;border-top:1px solid var(--line);}
+  .row:first-of-type{border-top:none;}
+  .label{font-size:13px;font-weight:500;}
+  .hint{font-size:12px;color:var(--sub);margin-top:3px;max-width:330px;line-height:1.45;}
+  .shortcut{display:inline-flex;gap:6px;align-items:center;background:var(--chip);border:none;border-radius:6px;padding:5px 12px;font-size:12px;color:var(--text);cursor:pointer;min-width:120px;justify-content:center;}
+  .shortcut:hover{background:var(--accent-soft);color:var(--accent);}
+  .seg{display:inline-flex;background:var(--chip);border-radius:8px;padding:2px;}
+  .seg span{padding:5px 12px;border-radius:6px;font-size:12px;color:var(--sub);}
+  .seg span.on{background:#fff;color:var(--text);box-shadow:0 1px 2px rgba(0,0,0,.08);}
+  .note{margin-top:16px;background:var(--accent-soft);border-radius:10px;padding:13px 15px;font-size:12.5px;line-height:1.6;color:#0b3d73;}
+  .note b{color:#07305c;}
+</style>
+</head>
+<body>
+<div class="window">
+  <div class="titlebar">
+    <span class="dot r"></span><span class="dot y"></span><span class="dot g"></span>
+    <span style="margin-left:10px;">SoundIn · 设置 · 语音输入</span>
+  </div>
+  <div class="body">
+    <h2>语音输入</h2>
+
+    <!-- 块 1：单击 -->
+    <div class="block">
+      <div class="block-title">单击触发</div>
+      <div class="row">
+        <div>
+          <div class="label">单击快捷键</div>
+          <div class="hint">点一下 = 开始录音；再点一下 = 停止（切换开 / 关）。</div>
+        </div>
+        <button class="shortcut">⌘ ⇧ Space</button>
+      </div>
+    </div>
+
+    <!-- 块 2：长按 -->
+    <div class="block">
+      <div class="block-title">长按触发</div>
+      <div class="row">
+        <div>
+          <div class="label">长按快捷键</div>
+          <div class="hint">按住不放 = 边按边录；松开 = 停止（按住说话）。</div>
+        </div>
+        <button class="shortcut">⌥ ⇧ Space</button>
+      </div>
+      <div class="row">
+        <div>
+          <div class="label">长按阈值</div>
+          <div class="hint">按住超过此时长才判定为「长按说话」。</div>
+        </div>
+        <div class="seg">
+          <span>0.5 秒</span>
+          <span class="on">0.7 秒</span>
+          <span>1.0 秒</span>
+        </div>
+      </div>
+    </div>
+
+    <div class="note">
+      <b>说明</b><br>
+      · 两块各自配置独立的快捷键，两个键同时生效、互不冲突。<br>
+      · 单击键用于快速切换开 / 关；长按键用于按住说话、松手即停。<br>
+      · 录音中按 Esc 取消本次输入，两种模式均生效。<br>
+      · 菜单栏图标点击等同于「单击触发」（切换开 / 关）。
+    </div>
+  </div>
+</div>
+</body>
+</html>

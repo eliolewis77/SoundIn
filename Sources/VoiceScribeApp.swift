@@ -190,11 +190,12 @@ private struct SettingsView: View {
     @State private var newProfileName = ""
     @State private var addProfileTarget: Page = .engine
     @State private var profilePendingDelete: APIProfile?
-    @State private var shortcut: HotkeyInputManager.Shortcut = HotkeyInputManager.shared.shortcut
-    @State private var triggerMode: HotkeyInputManager.TriggerMode = HotkeyInputManager.shared.triggerMode
+    @State private var clickShortcut: HotkeyInputManager.Shortcut = HotkeyInputManager.shared.clickShortcut
+    @State private var holdShortcut: HotkeyInputManager.Shortcut = HotkeyInputManager.shared.holdShortcut
     @State private var holdThreshold: Double = HotkeyInputManager.shared.holdThreshold
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
-    @State private var isRecordingShortcut = false
+    @State private var capturingSlot: Slot? = nil
+    private enum Slot: Equatable { case click, hold }
     @State private var registrationError: String?
     @State private var isTestRecording = false
     @State private var isTranscribing = false
@@ -346,31 +347,9 @@ private struct SettingsView: View {
     @ViewBuilder
     private var generalPage: some View {
         Section("语音输入") {
-            Picker("触发方式", selection: Binding(
-                get: { triggerMode },
-                set: { newValue in
-                    triggerMode = newValue
-                    HotkeyInputManager.shared.triggerMode = newValue
-                }
-            )) {
-                ForEach(HotkeyInputManager.TriggerMode.allCases, id: \.self) { mode in
-                    Text(mode.displayName).tag(mode)
-                }
-            }
-
-            if triggerMode == .hold {
-                Picker("确认等待", selection: Binding(
-                    get: { holdThreshold },
-                    set: { newValue in
-                        holdThreshold = newValue
-                        HotkeyInputManager.shared.holdThreshold = newValue
-                    }
-                )) {
-                    Text("0.5 秒").tag(0.5)
-                    Text("0.7 秒").tag(0.7)
-                    Text("1.0 秒").tag(1.0)
-                }
-            }
+            Text("触发设置在「快捷键」页：单击键切换开 / 关，长按键按住说话、松手即停。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
         }
 
         Section {
@@ -391,62 +370,104 @@ private struct SettingsView: View {
                 }
             ))
         } footer: {
-            Text("长按模式：按住热键说话，松开自动识别并输入。单击模式：按一下开始，再按一下结束。")
+            Text("单击键：点一下开始，再点一下结束。长按键：按住说话，松开自动识别并输入。录音中按 Esc 取消。")
         }
     }
 
-    // MARK: - 快捷键
+    // MARK: - 快捷键（单击 / 长按两块独立触发）
     @ViewBuilder
     private var hotkeysPage: some View {
-        Section("语音输入热键") {
+        Section("单击触发") {
             HStack {
-                Text("热键")
+                Text("单击快捷键")
                 Spacer()
-                Button(isRecordingShortcut ? "请按下新快捷键…（点击或 Esc 取消）" : shortcut.displayText) {
-                    if isRecordingShortcut {
-                        // 录制状态下再次点击 = 取消，避免卡死在录制态
-                        HotkeyInputManager.shared.cancelSystemCapture()
-                        isRecordingShortcut = false
-                        return
-                    }
-                    HotkeyFileLog.shared.log("settings: record button clicked")
-                    isRecordingShortcut = true
-                    registrationError = nil
-                    HotkeyInputManager.shared.beginSystemCapture(
-                        onCancel: {
-                            isRecordingShortcut = false
-                        },
-                        onComplete: { keyCode, modifiers in
-                            let newShortcut = HotkeyInputManager.Shortcut(
-                                keyCode: keyCode,
-                                modifiersRawValue: modifiers.intersection(.deviceIndependentFlagsMask).rawValue
-                            )
-                            shortcut = newShortcut
-                            HotkeyInputManager.shared.shortcut = newShortcut
-                            isRecordingShortcut = false
-                            // 注册失败（组合键被占用）立即提示，而不是静默不生效
-                            registrationError = HotkeyInputManager.shared.lastRegistrationError
-                        }
-                    )
-                }
+                shortcutCaptureButton(.click, title: clickShortcut.displayText)
             }
+            shortcutWarnings(for: clickShortcut)
+        }
+
+        Section("长按触发") {
+            HStack {
+                Text("长按快捷键")
+                Spacer()
+                shortcutCaptureButton(.hold, title: holdShortcut.displayText)
+            }
+            shortcutWarnings(for: holdShortcut)
+
+            Picker("长按阈值", selection: Binding(
+                get: { holdThreshold },
+                set: { newValue in
+                    holdThreshold = newValue
+                    HotkeyInputManager.shared.holdThreshold = newValue
+                }
+            )) {
+                Text("0.5 秒").tag(0.5)
+                Text("0.7 秒").tag(0.7)
+                Text("1.0 秒").tag(1.0)
+            }
+        }
+
+        Section {
+            Text("单击键：点一下开始，再点一下结束。长按键：按住说话，松开即停。两个快捷键同时生效。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
             Text("点击后按下任意按键即可：单键、组合键、或仅修饰键（如 ⌘⌥）均可。Esc 取消。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-            if shortcut.isModifierOnly {
-                Text("修饰键热键需要在「系统设置 → 隐私与安全性 → 输入监控」中授权 VoiceScribe，才能在所有应用中生效。")
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
-            } else if !shortcut.modifiers.contains([.command, .control, .option, .shift]) {
-                Text("当前是单键热键：该按键会被全局接管，在其他应用中按下它将不会正常输入。")
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
-            }
             if let registrationError {
                 Text(registrationError)
                     .font(.footnote)
                     .foregroundStyle(.red)
             }
+        }
+    }
+
+    private func shortcutCaptureButton(_ slot: Slot, title: String) -> some View {
+        Button(capturingSlot == slot ? "请按下新快捷键…（点击或 Esc 取消）" : title) {
+            if capturingSlot == slot {
+                // 录制状态下再次点击 = 取消，避免卡死在录制态
+                HotkeyInputManager.shared.cancelSystemCapture()
+                capturingSlot = nil
+                return
+            }
+            HotkeyFileLog.shared.log("settings: record \(slot) clicked")
+            capturingSlot = slot
+            registrationError = nil
+            HotkeyInputManager.shared.beginSystemCapture(
+                onCancel: {
+                    capturingSlot = nil
+                },
+                onComplete: { keyCode, modifiers in
+                    let newShortcut = HotkeyInputManager.Shortcut(
+                        keyCode: keyCode,
+                        modifiersRawValue: modifiers.intersection(.deviceIndependentFlagsMask).rawValue
+                    )
+                    switch slot {
+                    case .click:
+                        clickShortcut = newShortcut
+                        HotkeyInputManager.shared.clickShortcut = newShortcut
+                    case .hold:
+                        holdShortcut = newShortcut
+                        HotkeyInputManager.shared.holdShortcut = newShortcut
+                    }
+                    capturingSlot = nil
+                    // 注册失败（组合键被占用）立即提示，而不是静默不生效
+                    registrationError = HotkeyInputManager.shared.lastRegistrationError
+                }
+            )
+        }
+    }
+
+    @ViewBuilder
+    private func shortcutWarnings(for shortcut: HotkeyInputManager.Shortcut) -> some View {
+        if shortcut.isModifierOnly {
+            Text("修饰键热键需要在「系统设置 → 隐私与安全性 → 输入监控」中授权 VoiceScribe，才能在所有应用中生效。")
+                .font(.footnote)
+                .foregroundStyle(.orange)
+        } else if !shortcut.modifiers.contains([.command, .control, .option, .shift]) {
+            Text("当前是单键热键：该按键会被全局接管，在其他应用中按下它将不会正常输入。")
+                .font(.footnote)
+                .foregroundStyle(.orange)
         }
     }
 
