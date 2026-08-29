@@ -346,12 +346,6 @@ private struct SettingsView: View {
     // MARK: - 通用
     @ViewBuilder
     private var generalPage: some View {
-        Section("语音输入") {
-            Text("触发设置在「快捷键」页：单击键切换开 / 关，长按键按住说话、松手即停。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-
         Section {
             Toggle("开机时启动", isOn: Binding(
                 get: { launchAtLogin },
@@ -383,7 +377,6 @@ private struct SettingsView: View {
                 Spacer()
                 shortcutCaptureButton(.click, title: clickShortcut.displayText)
             }
-            shortcutWarnings(for: clickShortcut)
         }
 
         Section("长按触发") {
@@ -392,7 +385,6 @@ private struct SettingsView: View {
                 Spacer()
                 shortcutCaptureButton(.hold, title: holdShortcut.displayText)
             }
-            shortcutWarnings(for: holdShortcut)
 
             Picker("长按阈值", selection: Binding(
                 get: { holdThreshold },
@@ -418,6 +410,11 @@ private struct SettingsView: View {
                 Text(registrationError)
                     .font(.footnote)
                     .foregroundStyle(.red)
+            }
+            ForEach(consolidatedShortcutWarnings, id: \.self) { msg in
+                Text(msg)
+                    .font(.footnote)
+                    .foregroundStyle(.orange)
             }
         }
     }
@@ -458,17 +455,20 @@ private struct SettingsView: View {
         }
     }
 
-    @ViewBuilder
-    private func shortcutWarnings(for shortcut: HotkeyInputManager.Shortcut) -> some View {
-        if shortcut.isModifierOnly {
-            Text("修饰键热键需要在「系统设置 → 隐私与安全性 → 输入监控」中授权 VoiceScribe，才能在所有应用中生效。")
-                .font(.footnote)
-                .foregroundStyle(.orange)
-        } else if !shortcut.modifiers.contains([.command, .control, .option, .shift]) {
-            Text("当前是单键热键：该按键会被全局接管，在其他应用中按下它将不会正常输入。")
-                .font(.footnote)
-                .foregroundStyle(.orange)
+    /// 两块快捷键的授权/接管提示合并到一处（去重），只在设置页最底部显示一次
+    private var consolidatedShortcutWarnings: [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        for shortcut in [clickShortcut, holdShortcut] {
+            if shortcut.isModifierOnly {
+                let msg = "修饰键热键需要在「系统设置 → 隐私与安全性 → 输入监控」中授权 VoiceScribe，才能在所有应用中生效。"
+                if seen.insert(msg).inserted { result.append(msg) }
+            } else if !shortcut.modifiers.contains([.command, .control, .option, .shift]) {
+                let msg = "当前是单键热键：该按键会被全局接管，在其他应用中按下它将不会正常输入。"
+                if seen.insert(msg).inserted { result.append(msg) }
+            }
         }
+        return result
     }
 
     // MARK: - 识别引擎
