@@ -363,8 +363,6 @@ private struct SettingsView: View {
                     }
                 }
             ))
-        } footer: {
-            Text("单击键：点一下开始，再点一下结束。长按键：按住说话，松开自动识别并输入。录音中按 Esc 取消。")
         }
     }
 
