@@ -345,15 +345,36 @@ final class HotkeyInputManager {
         "。！？!?…".contains(c)
     }
 
+    /// 同一物理按键可能被 global + local 两个 monitor 重复投递。按 (类型+键码+修饰+时间戳) 去重，
+    /// 避免 toggle 模式下一次按下被处理两次（先 start 再 stop）。PERF-4。
+    private var lastHandledEventKey: String?
+    private var lastHandledEventTime: TimeInterval = 0
+
+    private func shouldHandleEvent(_ event: NSEvent) -> Bool {
+        let key = "\(event.type.rawValue):\(event.keyCode):\(event.modifierFlags.rawValue):\(event.timestamp)"
+        let now = ProcessInfo.processInfo.systemUptime
+        if key == lastHandledEventKey, now - lastHandledEventTime < 0.05 {
+            return false
+        }
+        lastHandledEventKey = key
+        lastHandledEventTime = now
+        return true
+    }
+
     func start() {
         guard globalMonitor == nil else { return }
         registerCarbonHotKey()
 
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
-            Task { @MainActor in self?.handleKeyEvent(event) }
+            Task { @MainActor in
+                guard let self, self.shouldHandleEvent(event) else { return }
+                self.handleKeyEvent(event)
+            }
         }
         localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
             guard let self else { return event }
+            // 重复投递：原样放行，不吞事件，交给（或已由）另一个 monitor 处理
+            if !self.shouldHandleEvent(event) { return event }
             if self.handleKeyEvent(event) { return nil }
             return event
         }

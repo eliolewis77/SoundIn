@@ -3,6 +3,7 @@ import Speech
 import SwiftUI
 import AVFoundation
 import CoreAudio
+import os.lock
 
 /// A thread-safe audio buffer handler for speech recognition
 /// This class handles audio capture on the audio thread without MainActor isolation
@@ -1077,6 +1078,8 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         let apiLevelSink = MainActorEventSink<CGFloat> { [weak self] level in
             self?.audioLevel = level
         }
+        // 电平投递降频（PERF-3）：每 ~40ms 才向主线程投递一次，避免 ~45 次/秒的小 Task 抖动
+        let lastLevelSent = OSAllocatedUnfairLock<Double>(uncheckedState: 0)
         let apiTapHandler: @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void = { buffer, _ in
             if useSegments {
                 if let segment = segmentedWriter.write(buffer) {
@@ -1087,7 +1090,15 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             }
 
             Self.updateAudioLevel(from: buffer) { level in
-                apiLevelSink.send(level)
+                let now = ProcessInfo.processInfo.systemUptime
+                let shouldSend = lastLevelSent.withLock { last -> Bool in
+                    if now - last >= 0.04 {
+                        last = now
+                        return true
+                    }
+                    return false
+                }
+                if shouldSend { apiLevelSink.send(level) }
             }
         }
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat, block: apiTapHandler)
@@ -1147,12 +1158,22 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         let levelSink = MainActorEventSink<CGFloat> { [weak self] level in
             self?.audioLevel = level
         }
+        // 电平投递降频（PERF-3）：每 ~40ms 才向主线程投递一次，避免 ~45 次/秒的小 Task 抖动
+        let lastLevelSent = OSAllocatedUnfairLock<Double>(uncheckedState: 0)
         let tapHandler: @Sendable (AVAudioPCMBuffer, AVAudioTime) -> Void = { buffer, _ in
             handler.appendBuffer(buffer)
 
             // Calculate audio level for waveform visualization
             Self.updateAudioLevel(from: buffer) { level in
-                levelSink.send(level)
+                let now = ProcessInfo.processInfo.systemUptime
+                let shouldSend = lastLevelSent.withLock { last -> Bool in
+                    if now - last >= 0.04 {
+                        last = now
+                        return true
+                    }
+                    return false
+                }
+                if shouldSend { levelSink.send(level) }
             }
         }
         inputNode.installTap(onBus: 0, bufferSize: 1024, format: recordingFormat, block: tapHandler)
@@ -1415,16 +1436,16 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             }
         }
 
-        let boundary = "Boundary-\(UUID().uuidString)"
-        var request = URLRequest(url: endpointURL)
-        request.httpMethod = "POST"
-        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try multipartTranscriptionBody(
-            boundary: boundary,
+        // 语言码依赖用户设置，仍在主线程算；但整文件读盘 + body 拼接在后台线程完成（见 buildTranscriptionRequest），
+        // 避免松手时主线程被几十 MB 的 Data 构造卡住。这是 P1-7 未完成的后半段（PERF-1）。
+        let languageCode = preferredSpeechAPILanguageCode()
+
+        let request = try await Self.buildTranscriptionRequest(
+            endpointURL: endpointURL,
+            apiKey: apiKey,
             modelName: modelName,
             audioURL: recognitionURL,
-            languageCode: preferredSpeechAPILanguageCode()
+            languageCode: languageCode
         )
 
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -1435,6 +1456,31 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
 
         let transcription = try JSONDecoder().decode(SpeechTranscriptionResponse.self, from: data)
         return transcription.text.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// 在后台线程构造 multipart 请求：整文件读盘（Data(contentsOf:)）与 body 拼接都在 detached 任务内完成，
+    /// 主线程只 await 结果，消除松手瞬间的卡顿（PERF-1）。
+    private nonisolated static func buildTranscriptionRequest(
+        endpointURL: URL,
+        apiKey: String,
+        modelName: String,
+        audioURL: URL,
+        languageCode: String?
+    ) async throws -> URLRequest {
+        try await Task.detached(priority: .utility) {
+            let boundary = "Boundary-\(UUID().uuidString)"
+            var request = URLRequest(url: endpointURL)
+            request.httpMethod = "POST"
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+            request.httpBody = try Self.multipartTranscriptionBody(
+                boundary: boundary,
+                modelName: modelName,
+                audioURL: audioURL,
+                languageCode: languageCode
+            )
+            return request
+        }.value
     }
 
     private nonisolated static func trimmedAudioURLForRecognition(_ audioURL: URL) async -> URL? {
@@ -1824,7 +1870,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         return URL(string: "\(trimmedSlashes)/audio/transcriptions")
     }
 
-    private func multipartTranscriptionBody(
+    private nonisolated static func multipartTranscriptionBody(
         boundary: String,
         modelName: String,
         audioURL: URL,
@@ -1896,8 +1942,12 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         }
     }
 
+    /// SFSpeechRecognizer.supportedLocales() 每次调用都重新枚举，开销大；设备支持的语言集在进程内不变，
+    /// 缓存一次避免每次转写/录音重算（PERF-2）。
+    private static let cachedSupportedLocaleIdentifiers: [String] = SFSpeechRecognizer.supportedLocales().map { $0.identifier }
+
     private func supportedSystemSpeechLocaleIdentifier() -> String {
-        let supported = SFSpeechRecognizer.supportedLocales().map { $0.identifier }
+        let supported = Self.cachedSupportedLocaleIdentifiers
 
         // 注意：不能用 Locale.current —— 它返回的是本 App 的本地化语言，
         // 未做中文本地化的 App 即使系统是中文也会得到 en_US。
