@@ -81,35 +81,40 @@ struct VoiceScribeApp: App {
         didSet { NotificationCenter.default.post(name: .voicePhaseChanged, object: nil) }
     }
 
-    /// SoundIn 品牌状态栏图标：与 App 图标同构「三根声波条(渐弱) + 输入块 + 细光标」
-    /// 按 gen_icon.py 的几何比例缩放（1024 → 16pt，k=0.03125），isTemplate 自适应深浅色
+    /// SoundIn 品牌状态栏图标：与 App 图标同构「三根声波条(渐弱) + 输入块 + 光标」
+    /// 所有竖条统一粗细（仅高度不同），按 gen_icon.py 几何比例缩放（1024 → 16pt，k=0.03125），isTemplate 自适应深浅色
     static let brandMenuBarIcon: NSImage = {
         let canvas: CGFloat = 16
         // gen_icon.py 尺寸 × k
         let k: CGFloat = 0.03125
-        let barW = 48 * k      // 1.5
-        let gap = 48 * k       // 1.5
-        let blockW = 80 * k    // 2.5（对应 App 图标的绿色输入块）
-        let cursorW = 40 * k   // 1.25
-        let startX = (canvas - (456 * k)) / 2   // 整体水平居中
+        // 统一粗细：声波条 / 输入块 / 光标 宽度一致，仅高度不同
+        let thickness = 48 * k   // 1.5
+        let gap = 48 * k        // 1.5
+        // 各元素高度（pt）保持现状：三根声波 5 / 9 / 13，输入块与光标 12
+        let barSpecs: [(CGFloat, CGFloat)] = [
+            (160 * k, 1.0),
+            (288 * k, 0.8),
+            (416 * k, 0.55),
+        ]
+        let blockH = 384 * k    // 12
+        let elementCount = barSpecs.count + 2
+        let totalW = thickness * CGFloat(elementCount) + gap * CGFloat(elementCount - 1)
+        let startX = (canvas - totalW) / 2   // 整体水平居中
         let image = NSImage(size: NSSize(width: canvas, height: canvas), flipped: false) { _ in
-            NSColor.black.setFill()
             var x = startX
-            // 左侧白色声波（透明度渐弱，与 App 图标一致）
-            for (heightRaw, alpha) in [(160.0, 1.0), (288.0, 0.8), (416.0, 0.55)] {
-                let h = CGFloat(heightRaw) * k
+            // 左侧三根声波（透明度渐弱，与 App 图标一致）
+            for (h, alpha) in barSpecs {
                 NSColor.black.withAlphaComponent(alpha).setFill()
-                NSBezierPath(roundedRect: CGRect(x: x, y: (canvas - h) / 2, width: barW, height: h),
-                             xRadius: barW / 2, yRadius: barW / 2).fill()
-                x += barW + gap
+                NSBezierPath(roundedRect: CGRect(x: x, y: (canvas - h) / 2, width: thickness, height: h),
+                             xRadius: thickness / 2, yRadius: thickness / 2).fill()
+                x += thickness + gap
             }
-            // 输入块 + 细光标（等高）
-            let blockH = 384 * k
-            for width in [blockW, cursorW] {
+            // 输入块 + 光标：统一粗细、等高（高度保持 12）
+            for _ in 0..<2 {
                 NSColor.black.setFill()
-                NSBezierPath(roundedRect: CGRect(x: x, y: (canvas - blockH) / 2, width: width, height: blockH),
-                             xRadius: width / 2, yRadius: width / 2).fill()
-                x += width + gap
+                NSBezierPath(roundedRect: CGRect(x: x, y: (canvas - blockH) / 2, width: thickness, height: blockH),
+                             xRadius: thickness / 2, yRadius: thickness / 2).fill()
+                x += thickness + gap
             }
             return true
         }
