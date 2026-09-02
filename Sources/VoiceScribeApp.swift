@@ -90,9 +90,10 @@ struct VoiceScribeApp: App {
         // 统一粗细：声波条 / 输入块 / 光标 宽度一致，仅高度不同
         let thickness = 48 * k   // 1.5
         let gap = 48 * k        // 1.5
-        // 各元素高度（pt）保持现状：三根声波 5 / 9 / 13，输入块与光标 12
+        // 各元素高度（pt）：三根声波 5 / 9 / 13，输入块 12，光标 10（最右，比输入块低一点）
         let barHeights: [CGFloat] = [160 * k, 288 * k, 416 * k]
-        let blockH = 384 * k    // 12
+        let blockH = 384 * k    // 12（第二右：输入块）
+        let cursorH = 320 * k   // 10（最右：光标，比输入块低一点）
         let elementCount = barHeights.count + 2
         let totalW = thickness * CGFloat(elementCount) + gap * CGFloat(elementCount - 1)
         let startX = (canvas - totalW) / 2   // 整体水平居中
@@ -105,10 +106,10 @@ struct VoiceScribeApp: App {
                              xRadius: thickness / 2, yRadius: thickness / 2).fill()
                 x += thickness + gap
             }
-            // 输入块 + 光标：统一粗细、等高（高度保持 12）
-            for _ in 0..<2 {
+            // 输入块（第二右，高 12）+ 光标（最右，高 10，比输入块低一点）
+            for h in [blockH, cursorH] {
                 NSColor.black.setFill()
-                NSBezierPath(roundedRect: CGRect(x: x, y: (canvas - blockH) / 2, width: thickness, height: blockH),
+                NSBezierPath(roundedRect: CGRect(x: x, y: (canvas - h) / 2, width: thickness, height: h),
                              xRadius: thickness / 2, yRadius: thickness / 2).fill()
                 x += thickness + gap
             }
