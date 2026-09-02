@@ -81,8 +81,8 @@ struct VoiceScribeApp: App {
         didSet { NotificationCenter.default.post(name: .voicePhaseChanged, object: nil) }
     }
 
-    /// SoundIn 品牌状态栏图标：与 App 图标同构「三根声波条(渐弱) + 输入块 + 光标」
-    /// 所有竖条统一粗细（仅高度不同），按 gen_icon.py 几何比例缩放（1024 → 16pt，k=0.03125），isTemplate 自适应深浅色
+    /// SoundIn 品牌状态栏图标：与 App 图标同构「三根声波条 + 输入块 + 光标」
+    /// 所有竖条统一粗细、统一为实心黑（颜色一致、不再渐弱透明），按 gen_icon.py 几何比例缩放（1024 → 16pt，k=0.03125），isTemplate 自适应深浅色
     static let brandMenuBarIcon: NSImage = {
         let canvas: CGFloat = 16
         // gen_icon.py 尺寸 × k
@@ -91,20 +91,16 @@ struct VoiceScribeApp: App {
         let thickness = 48 * k   // 1.5
         let gap = 48 * k        // 1.5
         // 各元素高度（pt）保持现状：三根声波 5 / 9 / 13，输入块与光标 12
-        let barSpecs: [(CGFloat, CGFloat)] = [
-            (160 * k, 1.0),
-            (288 * k, 0.8),
-            (416 * k, 0.55),
-        ]
+        let barHeights: [CGFloat] = [160 * k, 288 * k, 416 * k]
         let blockH = 384 * k    // 12
-        let elementCount = barSpecs.count + 2
+        let elementCount = barHeights.count + 2
         let totalW = thickness * CGFloat(elementCount) + gap * CGFloat(elementCount - 1)
         let startX = (canvas - totalW) / 2   // 整体水平居中
         let image = NSImage(size: NSSize(width: canvas, height: canvas), flipped: false) { _ in
             var x = startX
-            // 左侧三根声波（透明度渐弱，与 App 图标一致）
-            for (h, alpha) in barSpecs {
-                NSColor.black.withAlphaComponent(alpha).setFill()
+            // 左侧三根声波（与输入块/光标同为实心黑，颜色统一）
+            for h in barHeights {
+                NSColor.black.setFill()
                 NSBezierPath(roundedRect: CGRect(x: x, y: (canvas - h) / 2, width: thickness, height: h),
                              xRadius: thickness / 2, yRadius: thickness / 2).fill()
                 x += thickness + gap
