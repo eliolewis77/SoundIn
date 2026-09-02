@@ -193,6 +193,7 @@ private struct SettingsView: View {
     @State private var clickShortcut: HotkeyInputManager.Shortcut = HotkeyInputManager.shared.clickShortcut
     @State private var holdShortcut: HotkeyInputManager.Shortcut = HotkeyInputManager.shared.holdShortcut
     @State private var holdThreshold: Double = HotkeyInputManager.shared.holdThreshold
+    @State private var stripTrailingPunctuation: Bool = HotkeyInputManager.shared.stripTrailingPunctuation
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var capturingSlot: Slot? = nil
     private enum Slot: Equatable { case click, hold }
@@ -363,6 +364,15 @@ private struct SettingsView: View {
                     }
                 }
             ))
+
+            Toggle("去掉转写结果句末标点", isOn: Binding(
+                get: { stripTrailingPunctuation },
+                set: { newValue in
+                    stripTrailingPunctuation = newValue
+                    HotkeyInputManager.shared.stripTrailingPunctuation = newValue
+                }
+            ))
+            .help("开启后，粘贴的转写文本会去掉最后一个句号、问号、感叹号等终止标点。默认关闭。")
         }
     }
 

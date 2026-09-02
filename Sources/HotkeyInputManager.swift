@@ -140,6 +140,13 @@ final class HotkeyInputManager {
         }
     }
 
+    /// 是否去掉转写结果句末的最后一个终止标点（。！？!?…）。默认关闭，保留现有行为。
+    var stripTrailingPunctuation: Bool = UserDefaults.standard.bool(forKey: "voiceInputStripTrailingPunctuation") {
+        didSet {
+            UserDefaults.standard.set(stripTrailingPunctuation, forKey: "voiceInputStripTrailingPunctuation")
+        }
+    }
+
     var onStateChange: ((VoiceInputPhase) -> Void)?
 
     static var isShortcutCaptureActive = false
@@ -767,6 +774,15 @@ final class HotkeyInputManager {
                 }
             } else {
                 HotkeyFileLog.shared.log("paste: no AX selection readable — punctuation kept as-is")
+            }
+
+            // 可选：去掉句末最后一个终止标点（设置项，默认关闭）。放在所有标点跟随逻辑之后，
+            // 确保无论是否替换选中文本，开启后最终输入都不会以标点收尾。
+            if self?.stripTrailingPunctuation == true,
+               let last = trimmedText.last,
+               Self.isSentenceTerminator(last) {
+                trimmedText = String(trimmedText.dropLast())
+                HotkeyFileLog.shared.log("paste: trailing punctuation stripped (setting on)")
             }
 
             // 辅助功能权限是模拟 ⌘V 粘贴的前提；缺失时提前给出指引而不是先展示成功
