@@ -208,28 +208,43 @@ private struct SettingsView: View {
     @State private var polishConnectionTest: SpeechManager.ConnectionTestResult?
     @State private var isTestingPolishConnection = false
     @State private var isConfirmingClearHistory = false
+    @State private var sidebarVisible = true
 
     var body: some View {
-        NavigationSplitView {
-            List(selection: $selectedPage) {
-                ForEach(Page.allCases) { page in
-                    Label(page.title, systemImage: page.icon).tag(page)
+        HStack(spacing: 0) {
+            if sidebarVisible {
+                List(selection: $selectedPage) {
+                    ForEach(Page.allCases) { page in
+                        Label(page.title, systemImage: page.icon).tag(page)
+                    }
+                }
+                .listStyle(.sidebar)
+                .frame(minWidth: 130, idealWidth: 148, maxWidth: 176)
+                Divider()
+            }
+            Form {
+                switch selectedPage {
+                case .general: generalPage
+                case .hotkeys: hotkeysPage
+                case .engine: enginePage
+                case .polish: polishPage
+                case .test: testPage
+                case .stats: statsPage
+                case .about: aboutPage
                 }
             }
-            .navigationSplitViewColumnWidth(min: 130, ideal: 148, max: 176)
-        } detail: {
-            Form {
-            switch selectedPage {
-            case .general: generalPage
-            case .hotkeys: hotkeysPage
-            case .engine: enginePage
-            case .polish: polishPage
-            case .test: testPage
-            case .stats: statsPage
-            case .about: aboutPage
-            }
-            }
             .formStyle(.grouped)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .toolbar {
+            ToolbarItem(placement: .navigation) {
+                Button {
+                    withAnimation { sidebarVisible.toggle() }
+                } label: {
+                    Image(systemName: "sidebar.left")
+                }
+                .help(sidebarVisible ? "收起侧边栏" : "展开侧边栏")
+            }
         }
         .alert("新建配置档", isPresented: $isAddingProfile) {
             TextField("名称", text: $newProfileName)
