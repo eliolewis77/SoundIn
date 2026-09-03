@@ -395,6 +395,18 @@ private struct SpeechTranscriptionResponse: Decodable {
 /// AVAudioEngine tap、语音识别回调都在非主线程上触发，且 Swift 6 会推断
 /// 在 @MainActor 方法内创建的闭包继承主线程隔离——直接访问主线程状态会在
 /// 运行时触发 dispatch_assert_queue_fail 崩溃。用此通道显式跳回主线程。
+///
+/// **顺序不变式（P2-8）**：本 sink 不保证跨线程的投递顺序。
+/// 非主线程调用走 `Task { @MainActor in ... }` 入队，MainActor 执行器串行
+/// 消费，因此「入队顺序 = 消费顺序」仅在**生产者是单一串行队列**时成立；
+/// 一旦有多个线程并发 `send`，入队顺序取决于线程调度，到达主线程的顺序可能
+/// 乱序。因此调用方必须满足下列之一：
+/// 1. 顺序无关——只写标量/last-wins（如 `audioLevel` 电平），或消费端自带
+///    重排（如分段转写按 `index` 在 `finishSegmentedTranscription` 里重新
+///    `sorted`，乱序到达也不影响最终文本）；或
+/// 2. 自带单调序号/键，在消费端按序重组。
+/// 当前四个 sink 的生产者（installTap 回调、SFSpeechRecognizer resultHandler）
+/// 均为单一串行队列，实际不会乱序；此处仅把约束写清，防止未来并发接入点踩坑。
 private final class MainActorEventSink<T>: @unchecked Sendable {
     private let apply: @MainActor (T) -> Void
 
