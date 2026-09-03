@@ -35,5 +35,8 @@
 - 「去掉句末标点」开关：UserDefaults 键 `voiceInputStripTrailingPunctuation`（默认 false），stop() 仅在全部标点跟随逻辑之后、AX 权限检查之前剥除最后一个终止标点（。！？!?…）。
 
 ## 已回退待重启的功能
-- 热力图「占满宽度」改动（2026-09-03 已回退）：原需求「把宽度占满、不强制显示三个月」。实现上先因外层 GeometryReader 把 Form 行高撑成 0 导致热力图消失，改背景量宽后又因循环依赖卡在 6pt 兜底值、格子被压极小。最终用户要求恢复原样：固定 cellSize=14、gap=3，无 GeometryReader，Section 标题回到「最近 13 周」。若日后重做自适应，须先解决容器撑满宽度的问题（见上方 SwiftUI 布局坑）。
+- 热力图「占满宽度」：原需求「把宽度占满、不强制显示三个月」。2026-09-03 第一版（fix/stats-heatmap-fill-width→heatmap-geometryreader-height→heatmap-restore-original）走「响应式放大格子」路子，在 Form 行里用 GeometryReader 量宽，触发行高塌 0 + 循环依赖两个 bug，最终用户要求恢复原样（固定 cellSize=14、gap=3，标题「最近 13 周」）。
+  - **最终解法（2026-09-03，fix/heatmap-show-more-weeks，已合并 main）**：用户点破"只需在开头多显示几个月份"——固定 14pt 格子不动，把 `heatmapCells(weeks:)` 从 13 调到 26（最近半年），标题改「最近半年」。一行参数改动，不碰布局测量，彻底避开 GeometryReader 坑。
+  - 约束：统计 `retentionDays=90`，26 周(182天)里最左 ~13 周是空（暗）格（GitHub 风格正常表现）。若要左半也显示真实历史需另拉长保留期（未做）。
+  - 教训：Form/List 里"占满宽度"类需求，优先用「加数据列/固定尺寸铺满」而非「量容器反推格子尺寸」——后者必然撞 GeometryReader 行高坑与循环依赖。
 - 流式实时预览：定过方案 A（标题区显示最新转写、无省略号、通用页独立开关）；API 引擎需每 4s 强切预览段（段最短 8s+静音≥0.45s 才自然切）。详见 2026-08-22/23 日志。
