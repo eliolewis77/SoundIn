@@ -3,7 +3,9 @@
 ## Git 工作流约定（2026-08-23 用户确认）
 - 开发新功能一律切独立分支（如 `feat/xxx`），开发完验证通过后再合并回 `main`
 - 不在 main 上直接做实验性功能；撤销未达预期功能时优先弃分支，而非 revert 序列
-- 构建脚本：`./build-app.sh`，产物 `.build-cache/app/VoiceScribe.app`
+- 构建脚本：`./build-app.sh`，产物 `.build-cache/app/SoundIn.app`（已从 VoiceScribe.app 改名）
+- **构建结果判断**：`./build-app.sh 2>&1 | tail -40` 拿到的是 tail 的退出码，必须 `grep "error:"` 判断真实结果；沙箱会拦 SwiftPM 写 `~/.swiftpm/security`（file-write-unlink）导致后台任务误报 failed，只要 stdout 有 `Build complete!` 就是成功，需要干净退出码时用 `dangerouslyDisableSandbox` 重跑
+- **zsh 提交信息**：`-m "..."` 里含反引号会被当成命令替换，整条命令 parse error 且不执行。用 `git commit -F - <<'EOF'`（quoted heredoc）最稳
 
 ## 关键平台坑（macOS 26 SDK）
 - `AXUIElementCopyAttributeValue` 只剩 3 参数（error 出参移除）
