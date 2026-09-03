@@ -11,6 +11,11 @@
 - UID→设备翻译用 `kAudioHardwarePropertyTranslateUIDToDevice`（qualifier 传 CFString UID）
 - SwiftUI ViewBuilder 嵌套错位可能编译通过但 UI 不渲染（Picker 缺闭合括号吞掉后续 Toggle 的教训）
 
+## SwiftUI 设置页布局坑（2026-09-03 踩坑）
+- **`GeometryReader` 不要直接当 Form/Section（底层 List 行）的外层布局元素**：行高测量时被提议高度 0，它会把 0 当自己的高度报回去 → 整行塌成 0、内容被裁掉，表现是"视图消失"。
+- **不要用"量自身宽度反推子元素尺寸"做自适应**：会形成循环依赖（子元素尺寸 ← 量到的宽度 ← 容器宽度 ← 子元素尺寸），实测卡死在兜底最小值（热力图格子被压成 6pt）。
+- 结论：设置页 Form 里的网格类视图，**用固定格子尺寸最稳**。若确实要自适应，须先确认容器能被撑满宽度（如有 `Spacer()`/固定 frame），再量宽度，不能靠内容宽度反推。
+
 ## 触发架构（2026-08-29 定版）
 - **两个独立快捷键**：`clickShortcut`（单击切换开/关）+ `holdShortcut`（按住说话、松手停，含 `holdThreshold` 0.5/0.7/1.0s），同时生效、无二选一模式
 - Carbon 注册两个热键 id=1(click)/id=2(hold) 按 id 分派；纯修饰键热键走 NSEvent flagsChanged（Click/Hold 各自 armed）
@@ -22,4 +27,5 @@
 - 「去掉句末标点」开关：UserDefaults 键 `voiceInputStripTrailingPunctuation`（默认 false），stop() 仅在全部标点跟随逻辑之后、AX 权限检查之前剥除最后一个终止标点（。！？!?…）。
 
 ## 已回退待重启的功能
+- 热力图「占满宽度」改动（2026-09-03 已回退）：原需求「把宽度占满、不强制显示三个月」。实现上先因外层 GeometryReader 把 Form 行高撑成 0 导致热力图消失，改背景量宽后又因循环依赖卡在 6pt 兜底值、格子被压极小。最终用户要求恢复原样：固定 cellSize=14、gap=3，无 GeometryReader，Section 标题回到「最近 13 周」。若日后重做自适应，须先解决容器撑满宽度的问题（见上方 SwiftUI 布局坑）。
 - 流式实时预览：定过方案 A（标题区显示最新转写、无省略号、通用页独立开关）；API 引擎需每 4s 强切预览段（段最短 8s+静音≥0.45s 才自然切）。详见 2026-08-22/23 日志。
