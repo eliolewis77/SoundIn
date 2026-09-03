@@ -6,10 +6,47 @@ import Foundation
 final class DictationStats: ObservableObject {
     static let shared = DictationStats()
 
-    private let prefix = "dictationStats."
+    /// UserDefaults 键前缀（静态常量：缓存、清理、日键构造共用一份，避免两处硬编码不一致）
+    private static let keyPrefix = "dictationStats."
+    private var prefix: String { Self.keyPrefix }
     private let retentionDays = 90
     /// 当天已做过一次清理的标记（避免每次记录都全量扫描）
     private var lastCleanupDay = ""
+
+    // MARK: - PERF-5：避免重复读 UserDefaults / 重复新建 DateFormatter
+    //
+    // 统计页一次渲染的开销原本是：heatmapCells(weeks:13) 触发 91 次 count(for:)，
+    // 每次 count(for:) 都新建一个 DateFormatter（dateString 内）并读一次 UserDefaults；
+    // totalCount 还会额外做一次 UserDefaults.dictionaryRepresentation() 全量快照。
+    // 这里改为：复用单个 DateFormatter + 按天失效的内存计数缓存。
+
+    /// 复用的日期格式化器：类为 @MainActor，不存在并发访问
+    private static let dayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd"
+        return formatter
+    }()
+
+    /// 每日计数内存缓存：dayKey -> count
+    private var cachedCounts: [String: Int]?
+    /// 缓存所属日期：跨天后自动重建
+    private var cachedDay = ""
+
+    /// 内存缓存中的每日计数（跨天、写入、清理后失效重建）
+    private var counts: [String: Int] {
+        let today = Self.dateString(Date())
+        if let cachedCounts, cachedDay == today { return cachedCounts }
+        let snapshot = UserDefaults.standard.dictionaryRepresentation()
+            .reduce(into: [String: Int]()) { result, pair in
+                guard pair.key.hasPrefix(Self.keyPrefix), let value = pair.value as? Int else { return }
+                result[pair.key] = value
+            }
+        cachedCounts = snapshot
+        cachedDay = today
+        return snapshot
+    }
+
+    private func invalidateCountsCache() { cachedCounts = nil }
 
     /// 粘贴成功后调用：累计本次输入的字符数（空白字符不计）
     func record(_ text: String) {
@@ -19,6 +56,7 @@ final class DictationStats: ObservableObject {
         let defaults = UserDefaults.standard
         defaults.set(defaults.integer(forKey: key) + count, forKey: key)
         cleanupOldEntriesIfNeeded()
+        invalidateCountsCache()
         HotkeyFileLog.shared.log("stats: +\(count) chars, today=\(todayCount)")
         // 统计页实时刷新：数字与热力图随每次成功输入更新
         objectWillChange.send()
@@ -35,13 +73,7 @@ final class DictationStats: ObservableObject {
     }
 
     /// 保留期内累计（所有统计键求和）
-    var totalCount: Int {
-        UserDefaults.standard.dictionaryRepresentation()
-            .filter { $0.key.hasPrefix(prefix) }
-            .values
-            .compactMap { $0 as? Int }
-            .reduce(0, +)
-    }
+    var totalCount: Int { counts.values.reduce(0, +) }
 
     // MARK: - 热力图数据
 
@@ -78,17 +110,15 @@ final class DictationStats: ObservableObject {
     // MARK: - Private
 
     private static func dayKey(_ date: Date) -> String {
-        "dictationStats." + dateString(date)
+        Self.keyPrefix + dateString(date)
     }
 
     private static func dateString(_ date: Date) -> String {
-        let formatter = DateFormatter()
-        formatter.dateFormat = "yyyyMMdd"
-        return formatter.string(from: date)
+        dayFormatter.string(from: date)
     }
 
     private func count(for date: Date) -> Int {
-        UserDefaults.standard.integer(forKey: Self.dayKey(date))
+        counts[Self.dayKey(date)] ?? 0
     }
 
     /// 每天首次记录时清理超过保留期的旧键
@@ -99,7 +129,8 @@ final class DictationStats: ObservableObject {
 
         guard let cutoffDate = Calendar.current.date(byAdding: .day, value: -retentionDays, to: Date()) else { return }
         let cutoff = Self.dateString(cutoffDate)
-        for (key, _) in UserDefaults.standard.dictionaryRepresentation() where key.hasPrefix(prefix) {
+        // 走内存缓存的键集合，避免再对 UserDefaults 做一次全量快照
+        for key in counts.keys where key.hasPrefix(prefix) {
             if String(key.dropFirst(prefix.count)) < cutoff {
                 UserDefaults.standard.removeObject(forKey: key)
             }
