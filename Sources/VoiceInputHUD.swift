@@ -318,7 +318,9 @@ struct VoiceInputCapsuleView: View {
         switch manager.phase {
         case .recording:
             if isVoiceActive {
-                TimelineView(.animation) { timeline in
+                // PERF-8：原来用 .animation，会按屏幕刷新率（60/120Hz）每帧重绘声波条。
+                // 4 根小声波条不需要全帧率，降为固定 30fps，120Hz 屏上重绘次数降到 1/4，视觉几乎无差别。
+                TimelineView(.periodic(from: .now, by: 1.0 / 30)) { timeline in
                     HStack(spacing: 4) {
                         ForEach(0..<4, id: \.self) { index in
                             let level = waveLevel(at: timeline.date, index: index)
