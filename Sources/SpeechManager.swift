@@ -1403,24 +1403,28 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         guard !apiKey.isEmpty, !modelName.isEmpty else { return nil }
 
         await segmentTranscriptionLimiter.acquire()
-        defer {
-            Task {
-                await segmentTranscriptionLimiter.release()
-            }
-        }
 
+        // PERF-7：release 必须 await，不能塞进 detached Task 里 fire-and-forget。
+        // 原先 defer 里不能 await，只能派发一个 Task，导致：槽位在函数返回之后
+        // 才被释放，limit=2 下会让后续排队的分段不必要地多等一轮（分段是并发
+        // 转写的，这直接压低吞吐）；且每次转写多一次 Task 分配与调度。
+        // 改为单一出口后统一释放——取消路径同样会执行到这里，不会漏释放。
+        let text: String?
         do {
-            return try await transcribeAudioFileWithAPI(
+            text = try await transcribeAudioFileWithAPI(
                 segment.url,
                 endpointURL: endpointURL,
                 apiKey: apiKey,
                 modelName: modelName
             )
         } catch {
-            if Task.isCancelled { return nil }
-            HotkeyFileLog.shared.log("rec: segment[\(segment.index)] transcription failed — \(error.localizedDescription)")
-            return nil
+            if !Task.isCancelled {
+                HotkeyFileLog.shared.log("rec: segment[\(segment.index)] transcription failed — \(error.localizedDescription)")
+            }
+            text = nil
         }
+        await segmentTranscriptionLimiter.release()
+        return text
     }
 
     private func transcribeAudioFileWithAPI(
