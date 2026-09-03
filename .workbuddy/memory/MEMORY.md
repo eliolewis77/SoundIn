@@ -16,6 +16,11 @@
 - **不要用"量自身宽度反推子元素尺寸"做自适应**：会形成循环依赖（子元素尺寸 ← 量到的宽度 ← 容器宽度 ← 子元素尺寸），实测卡死在兜底最小值（热力图格子被压成 6pt）。
 - 结论：设置页 Form 里的网格类视图，**用固定格子尺寸最稳**。若确实要自适应，须先确认容器能被撑满宽度（如有 `Spacer()`/固定 frame），再量宽度，不能靠内容宽度反推。
 
+## Swift 6 并发坑（2026-09-03）
+- **复用 `DateFormatter` / `ISO8601DateFormatter` 时，不要写成 `static let`**：两者都非 `Sendable`，Swift 6 会报 error「static property is not concurrency-safe ... may have shared mutable state」。这**不是误报**——日志/统计这类工具方法可能从主线程或网络回调线程发起，格式化器本身非线程安全。
+- 正确解法：把格式化器作为**实例属性**，并把对它的使用**限制在一条串行队列内**（如 HotkeyFileLog 的 `queue`），靠队列串行化保证安全。**不要用 `nonisolated(unsafe)` 静默**——那只是关掉检查，竞争依然存在。
+- 相关：`FileHandle` 的 `write(_:)` 在此工程里按非 throwing 调用（照抄既有写法即可），`close()` 需要 `try?`。
+
 ## 触发架构（2026-08-29 定版）
 - **两个独立快捷键**：`clickShortcut`（单击切换开/关）+ `holdShortcut`（按住说话、松手停，含 `holdThreshold` 0.5/0.7/1.0s），同时生效、无二选一模式
 - Carbon 注册两个热键 id=1(click)/id=2(hold) 按 id 分派；纯修饰键热键走 NSEvent flagsChanged（Click/Hold 各自 armed）
