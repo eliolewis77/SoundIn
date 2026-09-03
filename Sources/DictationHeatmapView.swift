@@ -47,19 +47,8 @@ struct DictationHeatmapView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            // 月份标签行
-            ZStack(alignment: .topLeading) {
-                Color.clear.frame(height: 13)
-                ForEach(monthLabels, id: \.column) { label in
-                    Text(label.name)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .offset(x: weekdayGutter + CGFloat(label.column) * step)
-                }
-            }
-
             HStack(alignment: .top, spacing: 6) {
-                // 星期标签列
+                // 星期标签列（固定，不随横向滚动）
                 VStack(alignment: .trailing, spacing: 0) {
                     ForEach(0..<7, id: \.self) { row in
                         Text(["一", "", "三", "", "五", "", "日"][row])
@@ -69,16 +58,34 @@ struct DictationHeatmapView: View {
                     }
                 }
 
-                // 热力格子
-                HStack(spacing: gap) {
-                    ForEach(cells.indices, id: \.self) { column in
-                        VStack(spacing: gap) {
-                            ForEach(cells[column].indices, id: \.self) { row in
-                                let day = cells[column][row]
-                                RoundedRectangle(cornerRadius: 3.5, style: .continuous)
-                                    .fill(day.isFuture ? AnyShapeStyle(.clear) : AnyShapeStyle(color(for: day.count)))
-                                    .frame(width: cellSize, height: cellSize)
-                                    .help(tooltip(for: day))
+                // 月份标签 + 热力格子：横向滚动。窗口够宽时铺满、不够宽时滚动查看，
+                // 不再被裁切。星期列留在滚动区外固定，格子尺寸保持不变（不动用
+                // GeometryReader 量宽，规避 Form 行高塌 0 的坑）。
+                ScrollView(.horizontal, showsIndicators: false) {
+                    VStack(alignment: .leading, spacing: 6) {
+                        // 月份标签行
+                        ZStack(alignment: .topLeading) {
+                            Color.clear.frame(height: 13)
+                            ForEach(monthLabels, id: \.column) { label in
+                                Text(label.name)
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(.secondary)
+                                    .offset(x: CGFloat(label.column) * step)
+                            }
+                        }
+
+                        // 热力格子
+                        HStack(spacing: gap) {
+                            ForEach(cells.indices, id: \.self) { column in
+                                VStack(spacing: gap) {
+                                    ForEach(cells[column].indices, id: \.self) { row in
+                                        let day = cells[column][row]
+                                        RoundedRectangle(cornerRadius: 3.5, style: .continuous)
+                                            .fill(day.isFuture ? AnyShapeStyle(.clear) : AnyShapeStyle(color(for: day.count)))
+                                            .frame(width: cellSize, height: cellSize)
+                                            .help(tooltip(for: day))
+                                    }
+                                }
                             }
                         }
                     }
