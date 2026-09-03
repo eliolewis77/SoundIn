@@ -10,40 +10,74 @@ final class HotkeyFileLog: @unchecked Sendable {
     static let shared = HotkeyFileLog()
     private let queue = DispatchQueue(label: "com.codespace.voicescribe.filelog")
 
+    private static let logPath = NSString(string: "~/Library/Logs/VoiceScribe-debug.log").expandingTildeInPath
+    private static let rotationByteLimit = 5 * 1024 * 1024
+
+    /// 复用时间戳格式化器：原先每条日志都新建一个 ISO8601DateFormatter（PERF-6）。
+    /// 用实例属性而非 static：static 会被 Swift 6 判为跨线程共享可变状态
+    /// （ISO8601DateFormatter 非 Sendable，且 log() 可能从主线程/网络回调线程发起）。
+    /// 实例属性只在下面的串行 queue 上访问，既通过并发检查，也确实没有竞争。
+    private let stampFormatter: ISO8601DateFormatter = {
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return formatter
+    }()
+
+    /// 常驻文件句柄：原先每条日志都 open / seekToEnd / write / close（PERF-6）
+    private var handle: FileHandle?
+    /// 当前日志文件的大小估算：写入时累加，超过上限触发轮转。
+    /// 仅在打开句柄时按真实大小校准一次，取代原先每条日志一次的 stat。
+    private var knownSize = 0
+
     private init() {
-        let dir = NSString(string: "~/Library/Logs").expandingTildeInPath
+        let dir = (Self.logPath as NSString).deletingLastPathComponent
         try? FileManager.default.createDirectory(atPath: dir, withIntermediateDirectories: true)
     }
 
-    private static func stamp() -> String {
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        return formatter.string(from: Date())
-    }
-
     func log(_ message: String) {
-        let line = "\(Self.stamp()) \(message)\n"
-        let path = NSString(string: "~/Library/Logs/VoiceScribe-debug.log").expandingTildeInPath
         queue.async {
-            Self.rotateIfNeeded(path: path)
-            if let handle = FileHandle(forWritingAtPath: path) {
-                defer { try? handle.close() }
-                handle.seekToEndOfFile()
-                if let data = line.data(using: .utf8) { handle.write(data) }
-            } else {
-                try? line.write(toFile: path, atomically: true, encoding: .utf8)
-            }
+            self.writeLine(message)
         }
     }
 
-    /// 日志超过 5MB 时归档为 .old（只保留最近一份旧日志），避免无限增长
-    private static func rotateIfNeeded(path: String) {
-        guard let attrs = try? FileManager.default.attributesOfItem(atPath: path),
-              let size = attrs[.size] as? Int,
-              size > 5 * 1024 * 1024 else { return }
+    /// 只在 queue 上串行调用。时间戳也在这里生成（而不是在调用方线程），
+    /// 以保证 stampFormatter 只被这一条串行队列访问。
+    private func writeLine(_ message: String) {
+        let line = "\(stampFormatter.string(from: Date())) \(message)\n"
+        guard let data = line.data(using: .utf8) else { return }
+        if handle == nil { openHandle() }
+        if knownSize > Self.rotationByteLimit {
+            rotateLocked()
+            openHandle()
+        }
+        guard let handle else { return }
+        handle.write(data)
+        knownSize += data.count
+    }
+
+    /// 打开（或轮转后重新建立）日志文件，并把 knownSize 校准到文件真实大小
+    private func openHandle() {
+        let path = Self.logPath
+        if !FileManager.default.fileExists(atPath: path) {
+            FileManager.default.createFile(atPath: path, contents: nil)
+        }
+        guard let opened = FileHandle(forWritingAtPath: path) else { return }
+        opened.seekToEndOfFile()
+        handle = opened
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path)
+        knownSize = (attrs?[.size] as? Int) ?? 0
+    }
+
+    /// 归档当前日志为 .old（只保留最近一份旧日志），句柄置空；
+    /// 下次写入会重新建文件。轮转语义与改造前一致：先删旧 .old，再把当前文件改名。
+    private func rotateLocked() {
+        let path = Self.logPath
         let oldPath = path + ".old"
+        if let handle { try? handle.close() }
+        handle = nil
         try? FileManager.default.removeItem(atPath: oldPath)
         try? FileManager.default.moveItem(atPath: path, toPath: oldPath)
+        knownSize = 0
     }
 }
 
