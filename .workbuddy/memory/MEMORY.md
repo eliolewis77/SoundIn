@@ -22,6 +22,7 @@
 - **复用 `DateFormatter` / `ISO8601DateFormatter` 时，不要写成 `static let`**：两者都非 `Sendable`，Swift 6 会报 error「static property is not concurrency-safe ... may have shared mutable state」。这**不是误报**——日志/统计这类工具方法可能从主线程或网络回调线程发起，格式化器本身非线程安全。
 - 正确解法：把格式化器作为**实例属性**，并把对它的使用**限制在一条串行队列内**（如 HotkeyFileLog 的 `queue`），靠队列串行化保证安全。**不要用 `nonisolated(unsafe)` 静默**——那只是关掉检查，竞争依然存在。
 - 相关：`FileHandle` 的 `write(_:)` 在此工程里按非 throwing 调用（照抄既有写法即可），`close()` 需要 `try?`。
+- **`MainActorEventSink`（P2-8，2026-09-03 已文档化关闭）**：非主线程 `send` 走 `Task { @MainActor in ... }` 入队，MainActor 串行消费，故「入队顺序=消费顺序」仅在**生产者是单一串行队列**时成立；并发 `send` 会乱序。调用方须满足其一：① 顺序无关（标量/last-wins，如 `audioLevel`；或消费端自带重排如分段转写按 `index` 在 `finishSegmentedTranscription` 里 `sorted`）；② 自带单调序号在消费端重组。当前四个 sink 生产者（installTap 回调、`SFSpeechRecognizer` resultHandler）均串行，实际不乱序——坑只在未来有人从并发线程接新 sink。已在 `SpeechManager.swift` 的 `MainActorEventSink` 注释写死不变式。
 
 ## 触发架构（2026-08-29 定版）
 - **两个独立快捷键**：`clickShortcut`（单击切换开/关）+ `holdShortcut`（按住说话、松手停，含 `holdThreshold` 0.5/0.7/1.0s），同时生效、无二选一模式
