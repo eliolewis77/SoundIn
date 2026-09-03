@@ -428,9 +428,6 @@ private struct SettingsView: View {
             Text("单击键：点一下开始，再点一下结束。长按键：按住说话，松开即停。两个快捷键同时生效。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-            Text("点击后按下任意按键即可：单键、组合键、或仅修饰键（如 ⌘⌥）均可。Esc 取消。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
             if let registrationError {
                 Text(registrationError)
                     .font(.footnote)
@@ -555,9 +552,6 @@ private struct SettingsView: View {
                     engineConnectionTest = result
                     isTestingEngineConnection = false
                 }
-                Text("下方字段即当前选中的配置，直接修改会保存回该配置档。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -637,8 +631,6 @@ private struct SettingsView: View {
     private var polishPage: some View {
         Section {
             Toggle("启用文字优化", isOn: $speech.polishEnabled)
-        } footer: {
-            Text("语音转写完成后，可选地用大语言模型润色文字再输出：修正错别字、去除语气词、整理为书面语。")
         }
 
         if speech.polishEnabled {
@@ -683,9 +675,6 @@ private struct SettingsView: View {
                             .allowsHitTesting(false)
                     }
                 }
-                Text("系统默认指令会将转写结果整理为通顺书面语并保持原意，此处自定义后以你的指令为准。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
 
             Section {
@@ -722,10 +711,6 @@ private struct SettingsView: View {
                     .font(.callout)
                     .textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
-            } else if isTestRecording || isTranscribing {
-                Text("说几句话，然后点「停止并识别」查看转写结果。")
-                    .font(.footnote)
-                    .foregroundStyle(.secondary)
             }
         }
     }
