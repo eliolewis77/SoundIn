@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="0Cwe5ZUZECecUamrO7Ajcy">
+<head data-page-node-id="v2L11Y1ZwkhEfAMAzf9yfe">
+<meta charset="UTF-8" data-page-node-id="j84Q3kPpc9myurm9RZD3uX">
+<meta name="viewport" content="width=device-width, initial-scale=1.0" data-page-node-id="3DFFVRTp92DuHNDLZIxq6b">
+<title>SoundIn · 流式实时预览 设计稿</title>
+<style>
+  :root {
+    --bg: #f5f4f1;
+    --card: #ffffff;
+    --ink: #2c2c2a;
+    --sub: #8a8a86;
+    --line: #e8e6e0;
+    --green: #97c459;
+    --g4: #6f9e3d;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, "PingFang SC", sans-serif;
+    background: var(--bg); color: var(--ink);
+    padding: 44px 24px 80px;
+  }
+  .wrap { max-width: 860px; margin: 0 auto; }
+  h1 { font-size: 22px; font-weight: 600; margin-bottom: 6px; }
+  .lead { color: var(--sub); font-size: 14px; margin-bottom: 34px; line-height: 1.75; }
+  section { margin-bottom: 44px; }
+  h2 { font-size: 15px; font-weight: 600; margin-bottom: 14px; display:flex; align-items:center; gap:8px; }
+  h2 .num {
+    width: 20px; height: 20px; border-radius: 6px;
+    background: var(--green); color: #fff;
+    font-size: 12px; display: inline-flex; align-items: center; justify-content: center;
+  }
+  .window {
+    background: var(--card); border: 1px solid var(--line); border-radius: 12px;
+    overflow: hidden; box-shadow: 0 10px 34px rgba(0,0,0,.07); max-width: 560px;
+  }
+  .win-body { display: flex; min-height: 380px; }
+  .sidebar {
+    width: 148px; background: #eeece7; padding: 12px 10px;
+    border-right: 1px solid var(--line); flex-shrink: 0;
+  }
+  .side-item {
+    font-size: 13px; color: #55554f;
+    padding: 7px 11px; border-radius: 7px; margin-bottom: 2px;
+    display: flex; align-items: center; gap: 8px;
+  }
+  .side-item.active { background: #dcd9d1; color: var(--ink); font-weight: 600; }
+  .dot { width: 14px; height: 14px; border-radius: 4px; background: transparent; border: 1.5px solid #a5a29a; }
+  .side-item.active .dot { background: var(--green); border-color: var(--green); }
+  .detail { flex: 1; padding: 26px 28px; }
+
+  /* ── 通用页：新增开关 ── */
+  .field { display: flex; align-items: center; justify-content: space-between; padding: 11px 0; border-bottom: 1px solid var(--line); }
+  .field:last-child { border-bottom: none; }
+  .field .lab { font-size: 13.5px; }
+  .field .sub { font-size: 11.5px; color: var(--sub); margin-top: 2px; line-height: 1.5; }
+  .switch { width: 42px; height: 25px; border-radius: 14px; background: var(--green); position: relative; flex-shrink: 0; }
+  .switch.off { background: #cfcdc7; }
+  .switch .knob { position: absolute; top: 3px; right: 3px; width: 19px; height: 19px; border-radius: 50%; background: #fff; }
+  .switch.off .knob { left: 3px; right: auto; }
+  .sect-title { font-size: 12px; color: var(--sub); font-weight: 600; margin: 4px 0 8px; letter-spacing: .03em; }
+
+  /* ── HUD 录制态 ── */
+  .hud-stage { background: #2b2f33; border-radius: 12px; padding: 40px; display: flex; flex-direction: column; align-items: center; gap: 22px; }
+  .capsule {
+    background: rgba(255,255,255,.10); border: 1px solid rgba(255,255,255,.18);
+    border-radius: 16px; padding: 12px 16px; color: #fff;
+    display: flex; flex-direction: column; gap: 9px; backdrop-filter: blur(8px);
+  }
+  .capsule .live {
+    font-size: 13.5px; line-height: 1.5; min-height: 40px;
+    max-width: 300px; color: #f2f2f0;
+  }
+  .capsule .live .caret { color: var(--green); animation: blink 1s steps(2) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .capsule .wave { display: flex; align-items: flex-end; gap: 3px; height: 16px; }
+  .capsule .wave i { width: 3px; border-radius: 2px; background: #fff; opacity: .7; }
+  .capsule .meta { font-size: 10.5px; color: rgba(255,255,255,.5); display:flex; justify-content: space-between; }
+
+  /* 对比：当前态（无预览） */
+  .capsule.plain { padding: 14px 18px; }
+  .capsule.plain .wave { height: 18px; }
+
+  .label { font-size: 12px; color: var(--sub); margin-top: 4px; }
+  .row2 { display: flex; gap: 28px; flex-wrap: wrap; }
+
+  .note {
+    font-size: 12.5px; color: var(--sub); line-height: 1.85;
+    margin-top: 16px; padding-left: 16px; position: relative;
+  }
+  .note::before { content:""; position:absolute; left:2px; top:8px; width:6px; height:6px; border-radius:50%; background:var(--green); }
+  .note b { color: var(--ink); font-weight: 600; }
+  .ask {
+    background: #f4faec; border: 1px solid #dbe9c5; border-radius: 10px;
+    padding: 14px 16px; margin-top: 18px; font-size: 13px; line-height: 1.8; color: #3c4a2c;
+  }
+  .ask b { color: var(--g4); }
+</style>
+</head>
+<body data-page-node-id="gw2GXt1KXxzByIUOZBsmC6">
+<div class="wrap" data-page-node-id="6AZyCg4i8DBrBZ8blK0nVL">
+  <h1 data-page-node-id="asFk1OXGYNGeQ8edMoLPBU">SoundIn · 流式实时预览 设计稿（方案 A）</h1>
+  <p class="lead" data-page-node-id="2FxvFxqjGmV5i7n9Noeyez">录音转写（API 模式）时，把「正在识别的最新文字」实时显示出来，而不是等松手才一次性甩出整段。通用页加一个<b data-page-node-id="3KTHn8XIFholN9K86xIh5n">独立开关</b>，默认关，不影响现有行为。下面两块：① HUD 录制态怎么显示实时文字；② 通用页新增的开关。末尾有两个需要你拍板的设计点。</p>
+
+  <!-- ═══ 1. HUD 录制态 ═══ -->
+  <section data-page-node-id="TKrcVdgD4I6y7oPgExYGEt">
+    <h2 data-page-node-id="JDCOimCXASYmhBszsngiaC"><span class="num" data-page-node-id="1BBkvaA05Lt5GcwSBLKpOj">1</span>HUD 录制态：实时文字预览</h2>
+    <div class="row2" data-page-node-id="v0HU56QqkL0UefcHTDoQKB">
+      <!-- 当前 -->
+      <div data-page-node-id="8TUpIeBZqdXc99Nasx8mWJ">
+        <div class="hud-stage" data-page-node-id="KxZlSjqopI8AOUby5Zrans">
+          <div class="capsule plain" data-page-node-id="fa2kfIOFz23sZahBGiMWF6">
+            <div class="wave" data-page-node-id="rmaX4yRG1PvKk75D9WDQKt">
+              <i style="height:6px" data-page-node-id="9znEkzls5AAQOsdbKBjgH6"></i><i style="height:14px" data-page-node-id="9Xq5qLE1YzSXGy268Dhtvi"></i><i style="height:9px" data-page-node-id="tcGS8i3MZ941ecJMczqEXF"></i><i style="height:16px" data-page-node-id="TI85Q2Uw5vYtXPRSDEoINl"></i><i style="height:7px" data-page-node-id="NQEs7m4upXJKROznknZabe"></i><i style="height:12px" data-page-node-id="sWMiFtz4px1MgWwpqNSpiS"></i><i style="height:5px" data-page-node-id="naepEHNHs6BUBSzmFQqkLQ"></i>
+            </div>
+            <div class="meta" data-page-node-id="ncp8Jowg9cR3cwv41g6KtG"><span data-page-node-id="S2kS8VYLzEcOV5qW7VEnXz">● 录音中</span><span data-page-node-id="c6viLfuvCkal1B51tWF4wN">识别…</span></div>
+          </div>
+        </div>
+        <div class="label" style="color:var(--sub);text-align:center" data-page-node-id="O21G6mZ5smoYKrswAepMbh">当前：只有波形 + 进度，文字要等结束</div>
+      </div>
+      <!-- 新方案 -->
+      <div data-page-node-id="GsD0X6qV99WQaRwoGnFizb">
+        <div class="hud-stage" data-page-node-id="0PH9TUKA9WjXHk9GtjZA8Y">
+          <div class="capsule" data-page-node-id="L35m55heG7DY7OkDM8pUUP">
+            <div class="live" data-page-node-id="46DGzDOOC0Me1OjWhtNd1D">今天下午去超市买了点东西，顺便<span class="caret" data-page-node-id="gwlABSrYgjIGNklvmptW8I">▋</span></div>
+            <div class="wave" data-page-node-id="PMDoPAelZ16ZPIRKnWYmsg">
+              <i style="height:6px" data-page-node-id="ysaetQao9hWWvjZCiOLmQa"></i><i style="height:14px" data-page-node-id="nsYPoi9G3cOFvSerAwMWZx"></i><i style="height:9px" data-page-node-id="vcTWUy4h7kk8reaEIjobU2"></i><i style="height:16px" data-page-node-id="j0XKQooEAE9o6EU7cGWahb"></i><i style="height:7px" data-page-node-id="dwJnhpWdYOSZMfcQfXoBHa"></i><i style="height:12px" data-page-node-id="en77u59IzbVeOcencBOjNA"></i><i style="height:5px" data-page-node-id="LXPH7YSqqV0Df9MFGoZ21B"></i>
+            </div>
+            <div class="meta" data-page-node-id="jTqBXN505e4oQQ2wqXa9lM"><span data-page-node-id="n6nEAsA7bCXLafMIP81yxC">● 录音中</span><span data-page-node-id="d3Oz2ytdaeAABbgcyiHcQa">实时转写…</span></div>
+          </div>
+        </div>
+        <div class="label" style="color:var(--g4);text-align:center" data-page-node-id="3Z2msAe75c2ttvaMOv1WHY">新方案：波形上方多一行实时文字（无省略号）</div>
+      </div>
+    </div>
+    <div class="note" data-page-node-id="a7zRNpgH3mEHfl6n9pkNvh">
+      <b data-page-node-id="RIpAqkmJlFMCFk1nxLjYzG">分段节奏（引擎侧）</b>：API 转写按段返回，预览段每 <b data-page-node-id="AF3dC7KhmenFL487Eq5xmo">4 秒强制切一段</b>；若某段已达 <b data-page-node-id="d5THg0bhzj55kD7WHlVAsS">8 秒且末尾静音 ≥0.45 秒</b>则自然切段。即文字是「一段段刷新」而非逐字流动——这是 Whisper 类 API 的固有粒度，先讲清楚避免预期偏差。
+    </div>
+  </section>
+
+  <!-- ═══ 2. 通用页开关 ═══ -->
+  <section data-page-node-id="PXlxYPpT9i9AyACX38aB2v">
+    <h2 data-page-node-id="4TWvh3me9e22W6YGqpjUTe"><span class="num" data-page-node-id="HFYRKhyAIf8QAqZ1iglFmz">2</span>通用页：新增独立开关</h2>
+    <div class="window" data-page-node-id="buNqHiIa8zFrhYNHJwHXc7">
+      <div class="win-body" data-page-node-id="QBy2OBxUcqh5734XqzuYhy">
+        <div class="sidebar" data-page-node-id="IUgaXdyDryuRD4pqssUJyS">
+          <div class="side-item active" data-page-node-id="AKu6Pr59ox4FTeHYzTYJrI"><span class="dot" data-page-node-id="ynVHr81mKkMOnqh44nwKZn"></span>通用</div>
+          <div class="side-item" data-page-node-id="JFEVxMcEdzK7rPsJYN3PBJ"><span class="dot" data-page-node-id="QCzbI90Sb1OKAUtxD7EV3A"></span>快捷键</div>
+          <div class="side-item" data-page-node-id="Hk4wu1IfGPubaLXCTW8pGh"><span class="dot" data-page-node-id="OKdar7JhGy2MEwxvg0bXrL"></span>识别引擎</div>
+          <div class="side-item" data-page-node-id="kKV1wWfvscbLRtozc0YTmU"><span class="dot" data-page-node-id="PbHfkPluImqJFSIqKeYClG"></span>文字优化</div>
+          <div class="side-item" data-page-node-id="i2Q1qwkpejAGFPsUzBuiNM"><span class="dot" data-page-node-id="p1j52NPxPGS4ANtcBLFCC1"></span>录音测试</div>
+          <div class="side-item" data-page-node-id="i2qv7MDM9ToY69riF3lwrB"><span class="dot" data-page-node-id="f0V30hB4QBKMQ802z0Utq9"></span>统计</div>
+          <div class="side-item" data-page-node-id="3wuvQA1Bt3ZOv46WqebVvu"><span class="dot" data-page-node-id="u2F8pfmM2hHb16EDfPhdq9"></span>关于</div>
+        </div>
+        <div class="detail" data-page-node-id="DeFhG2Uwup3NevjmweUqGy">
+          <div class="sect-title" data-page-node-id="mN9HXCLaC6IwwpoTEtkWaB">录音</div>
+          <div class="field" data-page-node-id="DOujEcbWaNdRRMZxMyjgNj">
+            <div data-page-node-id="rs8vk0pnGhHCiMqPcds8Ue">
+              <div class="lab" data-page-node-id="0gQGBYJwdOCjR7AvDAm8NQ">去掉句末标点</div>
+              <div class="sub" data-page-node-id="vRgB6C2JZlY4PCua9BZDa4">停止听写时剥除最后一个终止标点</div>
+            </div>
+            <div class="switch off" data-page-node-id="sWiM4KlUaVWQbozmHHzQIp"><span class="knob" data-page-node-id="A06XAY7DVGxH6d5ony6Rix"></span></div>
+          </div>
+          <!-- 新增 -->
+          <div class="field" data-page-node-id="nwPrw5DQZBCvRCeGW7G8Y3">
+            <div data-page-node-id="SUXDN6wI4qe6N7C1QPEtiq">
+              <div class="lab" data-page-node-id="x10DtGJSI3XC3t3g0SEDVW">流式实时预览</div>
+              <div class="sub" data-page-node-id="zd2OkkBbtXrkHSeBiGgCNR">录音中转写文字实时显示在悬浮窗，松手才定稿</div>
+            </div>
+            <div class="switch" data-page-node-id="zFF4qAhB4GhLCaOsEIPQx9"><span class="knob" data-page-node-id="wr9sARIU0h00XS4JdHQeH8"></span></div>
+          </div>
+          <div class="sect-title" style="margin-top:14px" data-page-node-id="NEeqEA0ySYNVHSzbSlDGaE">启动</div>
+          <div class="field" data-page-node-id="d9HHPFxd1X7rW3WGvFBOQe">
+            <div data-page-node-id="xwwvelozf47LEKRaxLvtnr">
+              <div class="lab" data-page-node-id="0T4flWky2tD0SqOWTCacV2">登录后自启动</div>
+              <div class="sub" data-page-node-id="EiaUseJk8iGnXJVIeEZjql">随系统登录自动运行</div>
+            </div>
+            <div class="switch off" data-page-node-id="yvwHECveLNZuow1bA8XWc3"><span class="knob" data-page-node-id="9ZqtwSH98q9fCC085FfbHK"></span></div>
+          </div>
+        </div>
+      </div>
+    </div>
+    <div class="note" data-page-node-id="marChVsTpYSD5QU0AOCKLY">开关默认 <b data-page-node-id="31eg7amn0FW7Qtth5kqZH9">关闭</b>。开启后才在 HUD 录制态显示实时文字；关闭时行为与现在完全一致。本地识别模式（SFSpeechRecognizer）本就逐字返回，此开关主要影响 <b data-page-node-id="J0ANM9HvFCgAlXilFDrs2F">API 模式</b>。</div>
+  </section>
+
+  <!-- ═══ 需要拍板的点 ═══ -->
+  <section data-page-node-id="9cOV8ArPbQEXTHRv1rEdAc">
+    <h2 data-page-node-id="GVScGMGXvxXmbjEeXj6wPO"><span class="num" data-page-node-id="I9FU2Qaj9w3I5YvZTLApmD">?</span>两个需要你定的点</h2>
+    <div class="ask" data-page-node-id="d4AR5azUJpuYZ2Bko4gOCv">
+      <p data-page-node-id="H5fyFGvaHi5DZp1TGRml4w"><b data-page-node-id="KBnPhcP26hgTCA4DWKwlxb">① 胶囊尺寸</b>：现在悬浮窗是 136×72 的小胶囊，塞一行实时文字会非常挤。
+      两种处理——<br data-page-node-id="8e5jqmBz57Tvh5Qbngs4qX">
+      · <b data-page-node-id="FKNPND53M66CttkgGXqwsD">A</b>：录制中胶囊自动「长高」（如变 136×116），放下波形 + 一行文字，松手恢复 72 高；<br data-page-node-id="6vnlDCxiSvNyRmtTlaGHhq">
+      · <b data-page-node-id="pmA8USpiZtCZDBh2FZ2eEn">B</b>：胶囊保持原样，实时文字显示在胶囊<b data-page-node-id="2AqRrNs1YB7mF03eAfw2XG">正上方</b>一条单独的浮条里（像字幕）。<br data-page-node-id="isExHjhppiKHlHUOy6B0Sa">
+      我倾向 B（不动原胶囊尺寸，视觉更稳，字幕感也更符合"实时"），但 A 更紧凑。</p>
+      <p style="margin-top:12px" data-page-node-id="6NyVfyJ57pt0Dj8qADrjsC"><b data-page-node-id="5G0M62z1qonxzk2DikFGmt">② 文字来源</b>：API 模式是「整段返回」，所以显示的会是「最近一段的识别结果」并随新段覆盖，不是真正逐字流动。本地模式则是逐字。要不要给 API 模式的预览也标注一个"转写中…"的临时态？默认我会标。</p>
+    </div>
+  </section>
+</div>
+</body>
+</html>
