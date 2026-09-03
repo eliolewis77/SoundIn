@@ -756,7 +756,7 @@ private struct SettingsView: View {
             .padding(.vertical, 4)
         }
 
-        Section("最近听写") {
+        Section("最近 13 周") {
             DictationHeatmapView(cells: stats.heatmapCells(weeks: 13))
         }
 
