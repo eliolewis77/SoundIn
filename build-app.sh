@@ -25,5 +25,5 @@ EOF
 # 若希望跨构建保留稳定的代码签名身份（TCC 权限不重复弹窗），用环境变量指定自己的证书：
 #   SIGN_IDENTITY="Apple Development: you@example.com (TEAMID)" ./build-app.sh
 SIGN_IDENTITY="${SIGN_IDENTITY:--}"
-/usr/bin/codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DIR"
+/usr/bin/codesign --force --deep --sign "$SIGN_IDENTITY" --timestamp --options runtime "$APP_DIR"
 echo "$APP_DIR"

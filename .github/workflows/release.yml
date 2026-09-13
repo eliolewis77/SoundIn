@@ -2,7 +2,17 @@ name: Release
 
 # 自动发版：只要把 Info.plist 里的 CFBundleShortVersionString 改成一个新版本号并推到 main，
 # 本工作流就会构建 .app、打 vX.Y.Z 标签、并创建 GitHub Release（自动生成变更说明 + 附上构建产物）。
-# 同一版本号若已发过版则自动跳过，不会重复发版。
+# 同一个版本号若已发过版则自动跳过，不会重复发版。
+#
+# 真实签名 + 公证（可选）：在仓库 Settings → Secrets 配置以下密钥后，CI 会自动导入证书、用
+# Developer ID 签名并对产物做 notarize + staple，别人可直接双击打开：
+#   MACOS_SIGN_CERT_P12       导出的 .p12（base64 编码字符串）
+#   MACOS_SIGN_CERT_PASSWORD  .p12 的导出密码
+#   MACOS_SIGN_IDENTITY       证书身份，如 "Developer ID Application: Your Name (TEAMID)"
+#   MACOS_NOTARIZE_KEY_P8     App Store Connect API Key 的 .p8（base64 编码字符串）
+#   MACOS_NOTARIZE_KEY_ID     API Key ID（如 "ABCDE12345"）
+#   MACOS_NOTARIZE_ISSUER     Issuer ID（UUID）
+# 未配置这些密钥时，自动退回临时签名（ad-hoc），仍可发版但别人下载后需手动绕开 Gatekeeper。
 on:
   push:
     branches: [main]
@@ -39,21 +49,64 @@ jobs:
             echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
+      - name: Import signing certificate
+        id: sign
+        if: steps.check.outputs.exists == 'false'
+        env:
+          CERT_P12: ${{ secrets.MACOS_SIGN_CERT_P12 }}
+          CERT_PASS: ${{ secrets.MACOS_SIGN_CERT_PASSWORD }}
+        run: |
+          if [ -n "$CERT_P12" ] && [ -n "$CERT_PASS" ]; then
+            echo "enabled=true" >> "$GITHUB_OUTPUT"
+            echo "$CERT_P12" | base64 --decode > /tmp/sign.p12
+            security create-keychain -p "" build.keychain
+            security default-keychain -s build.keychain
+            security unlock-keychain -p "" build.keychain
+            security import /tmp/sign.p12 -k build.keychain -P "$CERT_PASS" -T /usr/bin/codesign
+            security set-key-partition-list -S apple-tool:,apple: -s -k "" build.keychain
+            rm -f /tmp/sign.p12
+          else
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            echo "No signing certificate secrets found — falling back to ad-hoc signature."
+          fi
+
       - name: Build app
         if: steps.check.outputs.exists == 'false'
+        env:
+          SIGN_IDENTITY: ${{ steps.sign.outputs.enabled == 'true' && secrets.MACOS_SIGN_IDENTITY || '' }}
         run: |
           chmod +x build-app.sh
           ./build-app.sh
           cd .build-cache/app
           /usr/bin/ditto -c -k --keepParent SoundIn.app SoundIn.app.zip
-          echo "ARTIFACT=$PWD/SoundIn.app.zip" >> "$GITHUB_ENV"
+
+      - name: Notarize and staple
+        if: steps.check.outputs.exists == 'false' && steps.sign.outputs.enabled == 'true'
+        env:
+          KEY_P8: ${{ secrets.MACOS_NOTARIZE_KEY_P8 }}
+          KEY_ID: ${{ secrets.MACOS_NOTARIZE_KEY_ID }}
+          ISSUER: ${{ secrets.MACOS_NOTARIZE_ISSUER }}
+        run: |
+          echo "$KEY_P8" | base64 --decode > "/tmp/AuthKey_${KEY_ID}.p8"
+          APP_ZIP="$GITHUB_WORKSPACE/.build-cache/app/SoundIn.app.zip"
+          APP="$GITHUB_WORKSPACE/.build-cache/app/SoundIn.app"
+          xcrun notarytool submit "$APP_ZIP" \
+            --key "/tmp/AuthKey_${KEY_ID}.p8" \
+            --key-id "$KEY_ID" \
+            --issuer "$ISSUER" \
+            --wait
+          xcrun stapler staple "$APP"
+          cd "$GITHUB_WORKSPACE/.build-cache/app"
+          /usr/bin/ditto -c -k --keepParent SoundIn.app SoundIn.app.zip
+          rm -f "/tmp/AuthKey_${KEY_ID}.p8"
 
       - name: Create GitHub Release
         if: steps.check.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ARTIFACT: ${{ github.workspace }}/.build-cache/app/SoundIn.app.zip
         run: |
           gh release create "v${{ steps.version.outputs.version }}" \
             --title "v${{ steps.version.outputs.version }}" \
             --generate-notes \
-            "${{ env.ARTIFACT }}"
+            "$ARTIFACT"

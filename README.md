@@ -57,7 +57,22 @@ macOS 会请求**麦克风**权限；为把转写结果输入到光标处，可�
 
 发版是**全自动**的：把 `Info.plist` 里的 `CFBundleShortVersionString` 改成一个新版本号（如 `1.0.1`）并推送到 `main`，GitHub Actions 会自动构建 `.app`、打 `vX.Y.Z` 标签、并创建 GitHub Release（自动生成变更说明，并附上构建产物 `SoundIn.app.zip`）。同一个版本号若已发过版会自动跳过，不会重复发版。
 
-> 注：CI 构建使用**临时签名（ad-hoc）**，产物仅供版本归档。要在你自己的 Mac 上正常使用该 `.app`，请用本地开发者证书重新签名，或按上面的 `Build & Run` 在本机自行构建。
+> 注：未配置签名密钥时，CI 构建使用**临时签名（ad-hoc）**，产物仅供版本归档。要在你自己的 Mac 上正常使用该 `.app`，请用本地开发者证书重新签名，或按上面的 `Build & Run` 在本机自行构建。
+
+### 让发版产物可直接双击打开（真实签名 + 公证）
+
+在仓库 **Settings → Secrets and variables → Actions** 里配置以下密钥后，CI 会自动导入证书、用 Developer ID 签名、并对产物做 notarize + staple，别人下载后可直接打开：
+
+| Secret | 内容 |
+| --- | --- |
+| `MACOS_SIGN_CERT_P12` | 从钥匙串导出的 **Developer ID Application** 证书 + 私钥 `.p12`，做 base64 后的字符串 |
+| `MACOS_SIGN_CERT_PASSWORD` | 导出 `.p12` 时设的密码 |
+| `MACOS_SIGN_IDENTITY` | 证书身份，如 `Developer ID Application: Your Name (TEAMID)` |
+| `MACOS_NOTARIZE_KEY_P8` | App Store Connect API Key 的 `.p8` 文件，做 base64 后的字符串 |
+| `MACOS_NOTARIZE_KEY_ID` | API Key ID（如 `ABCDE12345`） |
+| `MACOS_NOTARIZE_ISSUER` | Issuer ID（UUID） |
+
+公证要求证书必须是 **Developer ID Application**（不是普通的 Apple Development / Distribution），且需要付费的 Apple Developer 账户。未配置这些密钥时自动退回临时签名，发版不会失败。
 
 ## License
 
