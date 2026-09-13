@@ -7,7 +7,7 @@ APP_DIR="$BUILD_DIR/SoundIn.app"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 
-mkdir -p "$MACOS" "$CONTENTS/Resources"
+mkdir -p "$MACOS" "$CONTENTS/Resources" "$PWD/.build-cache/clang" "$PWD/.build-cache/tmp"
 CLANG_MODULE_CACHE_PATH="$PWD/.build-cache/clang" \
 TMPDIR="$PWD/.build-cache/tmp" \
 swift build -c release --disable-sandbox \

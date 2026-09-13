@@ -8,6 +8,7 @@ on:
     branches: [main]
     paths:
       - 'Info.plist'
+  workflow_dispatch:   # 手动重跑发版（如修复构建脚本后重新发同一版本）
 
 permissions:
   contents: write
