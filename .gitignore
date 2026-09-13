@@ -7,3 +7,10 @@ DerivedData/
 .swiftpm/configuration/registries.json
 .swiftpm/xcode/package.xcworkspace/contents.xcworkspacedata
 .netrc
+
+# WorkBuddy agent 内部记忆 / 配置（非项目源码，不随仓库发布）
+.workbuddy/
+
+# 本地环境变量 / 密钥文件
+.env
+*.env

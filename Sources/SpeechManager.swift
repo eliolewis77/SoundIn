@@ -288,7 +288,7 @@ private final class SegmentedAudioFileWriter: @unchecked Sendable {
 
     private static func audioURL(sessionID: UUID, name: String) -> URL {
         FileManager.default.temporaryDirectory
-            .appendingPathComponent("voicescribe-speech-\(sessionID.uuidString)-\(name).wav")
+            .appendingPathComponent("soundin-speech-\(sessionID.uuidString)-\(name).wav")
     }
 
     private static func averagePower(_ buffer: AVAudioPCMBuffer) -> Float {
@@ -994,6 +994,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                     } else {
                         self.errorMessage = NSLocalizedString("speech_microphone_permission_error", comment: "")
                         self.lastPermissionError = .permissionDenied(message: self.errorMessage ?? "麦克风权限未授权")
+                        self.isAwaitingPermission = false
                         self.isStarting = false
                         // 异步拒绝：此时同步检查早已结束，必须经 handler 上报，否则调用方永远收不到结果
                         let phase = self.lastPermissionError
@@ -1011,6 +1012,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                     } else {
                         self.errorMessage = NSLocalizedString("speech_permission_error", comment: "")
                         self.lastPermissionError = .permissionDenied(message: self.errorMessage ?? "语音识别权限未授权")
+                        self.isAwaitingPermission = false
                         self.isStarting = false
                         let phase = self.lastPermissionError
                         self.permissionOutcomeHandler?(phase)
@@ -1072,7 +1074,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             audioFileWriter.close()
         } else {
             let audioURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("voicescribe-speech-\(sessionID.uuidString).wav")
+                .appendingPathComponent("soundin-speech-\(sessionID.uuidString).wav")
             recordedAudioURL = audioURL
 
             let audioFile = try AVAudioFile(forWriting: audioURL, settings: recordingFormat.settings)
@@ -1556,7 +1558,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         guard keptFrames > 0, savedFrames >= minimumSavedFrames else { return nil }
 
         let outputURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("voicescribe-speech-trimmed-\(UUID().uuidString).wav")
+            .appendingPathComponent("soundin-speech-trimmed-\(UUID().uuidString).wav")
         try? FileManager.default.removeItem(at: outputURL)
 
         inputFile.framePosition = startFrame

@@ -60,4 +60,4 @@
 
 ## 总评
 
-最值得做的一次重构：把散落在 SpeechManager / HotkeyInputManager / VoiceScribeApp 三处的状态标志（isStarting / isRecording / isActive / currentPhase / sessionID×2）收敛为显式状态枚举 + 单一所有者。P0-1 与 P1-4、P1-5 都是这一结构性缺陷的症状。其次是临时文件生命周期统一交给 writer 类管理。
+最值得做的一次重构：把散落在 SpeechManager / HotkeyInputManager / SoundInApp 三处的状态标志（isStarting / isRecording / isActive / currentPhase / sessionID×2）收敛为显式状态枚举 + 单一所有者。P0-1 与 P1-4、P1-5 都是这一结构性缺陷的症状。其次是临时文件生命周期统一交给 writer 类管理。

@@ -13,7 +13,7 @@ TMPDIR="$PWD/.build-cache/tmp" \
 swift build -c release --disable-sandbox \
   --cache-path .build-cache/swift-build \
   --manifest-cache local
-cp ".build/release/VoiceScribe" "$MACOS/SoundIn"
+cp ".build/release/SoundIn" "$MACOS/SoundIn"
 cp Info.plist "$CONTENTS/Info.plist"
 cp Resources/AppIcon.icns "$CONTENTS/Resources/AppIcon.icns"
 
@@ -21,8 +21,9 @@ cat > "$CONTENTS/PkgInfo" <<'EOF'
 APPL????
 EOF
 
-# 签名身份：默认用本机 Apple Development 证书（稳定签名，TCC 权限跨构建保留）。
-# 可通过环境变量覆盖退回临时签名：SIGN_IDENTITY="-" ./build-app.sh
-SIGN_IDENTITY="${SIGN_IDENTITY:-Apple Development: xiaohees@foxmail.com (5V2J4DPU4L)}"
+# 签名身份：默认使用临时签名（ad-hoc, "-"），无需任何个人证书即可本地运行。
+# 若希望跨构建保留稳定的代码签名身份（TCC 权限不重复弹窗），用环境变量指定自己的证书：
+#   SIGN_IDENTITY="Apple Development: you@example.com (TEAMID)" ./build-app.sh
+SIGN_IDENTITY="${SIGN_IDENTITY:--}"
 /usr/bin/codesign --force --deep --sign "$SIGN_IDENTITY" "$APP_DIR"
 echo "$APP_DIR"

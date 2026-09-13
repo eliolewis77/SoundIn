@@ -3,14 +3,14 @@ import ApplicationServices
 import Carbon.HIToolbox
 import os
 
-private let logger = Logger(subsystem: "com.codespace.voicescribe", category: "hotkey")
+private let logger = Logger(subsystem: "com.eliokit.soundin", category: "hotkey")
 
-/// 文件诊断日志：~/Library/Logs/VoiceScribe-debug.log（不受系统日志沙箱限制）
+/// 文件诊断日志：~/Library/Logs/SoundIn-debug.log（不受系统日志沙箱限制）
 final class HotkeyFileLog: @unchecked Sendable {
     static let shared = HotkeyFileLog()
-    private let queue = DispatchQueue(label: "com.codespace.voicescribe.filelog")
+    private let queue = DispatchQueue(label: "com.eliokit.soundin.filelog")
 
-    private static let logPath = NSString(string: "~/Library/Logs/VoiceScribe-debug.log").expandingTildeInPath
+    private static let logPath = NSString(string: "~/Library/Logs/SoundIn-debug.log").expandingTildeInPath
     private static let rotationByteLimit = 5 * 1024 * 1024
 
     /// 复用时间戳格式化器：原先每条日志都新建一个 ISO8601DateFormatter（PERF-6）。
@@ -823,7 +823,7 @@ final class HotkeyInputManager {
             let axTrusted = AXIsProcessTrusted()
             HotkeyFileLog.shared.log("paste: ready length=\(trimmedText.count) axTrusted=\(axTrusted)")
             guard axTrusted else {
-                self?.onStateChange?(.permissionDenied(message: "需要在辅助功能中授权 VoiceScribe"))
+                self?.onStateChange?(.permissionDenied(message: "需要在辅助功能中授权 SoundIn"))
                 return
             }
 

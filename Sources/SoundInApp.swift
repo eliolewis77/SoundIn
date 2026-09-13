@@ -20,9 +20,9 @@ extension Notification.Name {
 }
 
 @main
-struct VoiceScribeApp: App {
+struct SoundInApp: App {
     @State private var speechManager = SpeechManager.shared
-    @State private var phase: VoiceInputPhase = VoiceScribeApp.currentPhase
+    @State private var phase: VoiceInputPhase = SoundInApp.currentPhase
     @NSApplicationDelegateAdaptor(AppDelegate.self) private var appDelegate
     @Environment(\.openWindow) private var openWindow
 
@@ -41,7 +41,7 @@ struct VoiceScribeApp: App {
             .padding(8)
             // 菜单栏此前从未订阅 voicePhaseChanged，图标与状态文字永远停留在初始值
             .onReceive(NotificationCenter.default.publisher(for: .voicePhaseChanged)) { _ in
-                phase = VoiceScribeApp.currentPhase
+                phase = SoundInApp.currentPhase
             }
         } label: {
             // 空闲时显示品牌标识（三根声波条 + 细光标），其余状态保留 SF Symbol 以传达实时信息
@@ -144,7 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         HotkeyInputManager.shared.start()
         HotkeyInputManager.shared.onStateChange = { newPhase in
             Task { @MainActor in
-                VoiceScribeApp.currentPhase = newPhase
+                SoundInApp.currentPhase = newPhase
                 // 底部胶囊 HUD 跟随语音输入状态（移植自 reme）
                 VoiceInputHUDManager.shared.apply(voicePhase: newPhase)
             }
@@ -483,7 +483,7 @@ private struct SettingsView: View {
         var result: [String] = []
         for shortcut in [clickShortcut, holdShortcut] {
             if shortcut.isModifierOnly {
-                let msg = "修饰键热键需要在「系统设置 → 隐私与安全性 → 输入监控」中授权 VoiceScribe，才能在所有应用中生效。"
+                let msg = "修饰键热键需要在「系统设置 → 隐私与安全性 → 输入监控」中授权 SoundIn，才能在所有应用中生效。"
                 if seen.insert(msg).inserted { result.append(msg) }
             } else if !shortcut.modifiers.contains([.command, .control, .option, .shift]) {
                 let msg = "当前是单键热键：该按键会被全局接管，在其他应用中按下它将不会正常输入。"
@@ -737,9 +737,24 @@ private struct SettingsView: View {
             SpeechManager.shared.useSegmentedAPIRecording =
                 speech.recognitionProvider == .api && SpeechManager.shared.preferSegmentedTranscription
             SpeechManager.shared.startRecordingSafe()
-            isTestRecording = SpeechManager.shared.isRecording
-            if !isTestRecording {
-                testResult = SpeechManager.shared.errorMessage ?? "无法开始录音，请检查麦克风权限"
+            if SpeechManager.shared.isRecording {
+                isTestRecording = true
+            } else {
+                // isRecording 为 false 有两种可能：
+                //  (a) 麦克风/语音识别权限「待定」(.notDetermined)——startRecordingSafe 已弹出系统授权框，
+                //      用户允许后 requestPermissions 回调会自动启动录音，这属于「进行中」，不是失败；
+                //  (b) 权限被拒或启动真的失败——errorMessage 已写明原因。
+                // 只有 (b) 才报「无法开始录音」，避免授权弹窗刚弹出就被误报成失败。
+                let mic = AVCaptureDevice.authorizationStatus(for: .audio)
+                let needsSpeech = SpeechManager.shared.recognitionProvider != .api
+                let speechPending = needsSpeech && SFSpeechRecognizer.authorizationStatus() == .notDetermined
+                if mic == .notDetermined || speechPending {
+                    isTestRecording = true
+                    testResult = "已在系统弹窗中请求麦克风授权，允许后即可开始录音"
+                } else {
+                    isTestRecording = false
+                    testResult = SpeechManager.shared.errorMessage ?? "无法开始录音，请检查麦克风权限"
+                }
             }
         }
     }

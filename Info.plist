@@ -7,7 +7,7 @@
     <key>CFBundleExecutable</key>
     <string>SoundIn</string>
     <key>CFBundleIdentifier</key>
-    <string>com.codespace.voicescribe</string>
+    <string>com.eliokit.soundin</string>
     <key>CFBundleName</key>
     <string>SoundIn</string>
     <key>CFBundleDisplayName</key>

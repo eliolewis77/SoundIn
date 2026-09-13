@@ -4,11 +4,11 @@
 import PackageDescription
 
 let package = Package(
-    name: "VoiceScribe",
+    name: "SoundIn",
     platforms: [.macOS(.v15)],
     targets: [
         .executableTarget(
-            name: "VoiceScribe",
+            name: "SoundIn",
             path: "Sources"
         ),
     ]

@@ -1,6 +1,6 @@
 # SoundIn 性能独立 Review（2026-08-29）
 
-范围：全量源码 4496 行（SpeechManager 1934 / VoiceScribeApp 850 / HotkeyInputManager 829 / VoiceInputHUD 400 等）。
+范围：全量源码 4496 行（SpeechManager 1934 / SoundInApp 850 / HotkeyInputManager 829 / VoiceInputHUD 400 等）。
 基线：`main` @ 16efa65。只做只读分析，未修改代码。
 
 ## 🔴 高：用户能直接感知的卡顿
