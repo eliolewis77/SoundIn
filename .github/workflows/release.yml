@@ -1,0 +1,58 @@
+name: Release
+
+# 自动发版：只要把 Info.plist 里的 CFBundleShortVersionString 改成一个新版本号并推到 main，
+# 本工作流就会构建 .app、打 vX.Y.Z 标签、并创建 GitHub Release（自动生成变更说明 + 附上构建产物）。
+# 同一版本号若已发过版则自动跳过，不会重复发版。
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'Info.plist'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # 需要完整标签历史用于「是否已发版」判断与自动变更说明
+
+      - name: Read version from Info.plist
+        id: version
+        run: |
+          VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $VERSION"
+
+      - name: Check if already released
+        id: check
+        run: |
+          if git tag -l "v${{ steps.version.outputs.version }}" | grep -q .; then
+            echo "Tag v${{ steps.version.outputs.version }} already exists — skipping release."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Build app
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          chmod +x build-app.sh
+          ./build-app.sh
+          cd .build-cache/app
+          /usr/bin/ditto -c -k --keepParent SoundIn.app SoundIn.app.zip
+          echo "ARTIFACT=$PWD/SoundIn.app.zip" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create "v${{ steps.version.outputs.version }}" \
+            --title "v${{ steps.version.outputs.version }}" \
+            --generate-notes \
+            "${{ env.ARTIFACT }}"

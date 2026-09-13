@@ -53,6 +53,12 @@ macOS 会请求**麦克风**权限；为把转写结果输入到光标处，可�
 | `build-app.sh` | release 编译 + 打包 + 签名 |
 | `Package.swift` | SwiftPM 包定义（executable target，产物名为 `SoundIn`） |
 
+## Releases
+
+发版是**全自动**的：把 `Info.plist` 里的 `CFBundleShortVersionString` 改成一个新版本号（如 `1.0.1`）并推送到 `main`，GitHub Actions 会自动构建 `.app`、打 `vX.Y.Z` 标签、并创建 GitHub Release（自动生成变更说明，并附上构建产物 `SoundIn.app.zip`）。同一个版本号若已发过版会自动跳过，不会重复发版。
+
+> 注：CI 构建使用**临时签名（ad-hoc）**，产物仅供版本归档。要在你自己的 Mac 上正常使用该 `.app`，请用本地开发者证书重新签名，或按上面的 `Build & Run` 在本机自行构建。
+
 ## License
 
 [MIT](LICENSE) — 详见 LICENSE 文件。
