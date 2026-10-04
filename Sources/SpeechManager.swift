@@ -5,6 +5,23 @@ import AVFoundation
 import CoreAudio
 import os.lock
 
+/// 连击翻译的目标语言。rawValue 直接进 prompt，同时作为设置页 Picker 的 tag。
+enum TranslateTarget: String, CaseIterable, Identifiable {
+    case english = "英语"
+    case simplifiedChinese = "简体中文"
+    case traditionalChinese = "繁体中文"
+    case japanese = "日语"
+    case korean = "韩语"
+    case french = "法语"
+    case german = "德语"
+    case spanish = "西班牙语"
+
+    var id: String { rawValue }
+
+    /// 送进 system prompt 的语言名（中文名足够模型理解，避免引入多余映射表）
+    var promptName: String { rawValue }
+}
+
 /// A thread-safe audio buffer handler for speech recognition
 /// This class handles audio capture on the audio thread without MainActor isolation
 private final class AudioBufferHandler: @unchecked Sendable {
@@ -505,6 +522,15 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
     static let defaultPolishPrompt =
         "将语音转写结果整理为通顺的书面语：修正错别字和口误，去除语气词，保持原意与原语言，不要添加任何内容。只输出整理后的文字。"
 
+    // ── 连击翻译：复用上面 polish 的接口配置，只换一条翻译指令 ──
+    var translateEnabled: Bool = UserDefaults.standard.object(forKey: "vs.translateEnabled") as? Bool ?? false {
+        didSet { UserDefaults.standard.set(translateEnabled, forKey: "vs.translateEnabled") }
+    }
+    var translateTarget: TranslateTarget = TranslateTarget(rawValue:
+        UserDefaults.standard.string(forKey: "vs.translateTarget") ?? "") ?? .english {
+        didSet { UserDefaults.standard.set(translateTarget.rawValue, forKey: "vs.translateTarget") }
+    }
+
     // MARK: - 连接测试
 
     enum ConnectionTestResult {
@@ -952,6 +978,65 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         } catch {
             HotkeyFileLog.shared.log("polish: failed — \(error.localizedDescription)")
             return text
+        }
+    }
+
+    /// 连击翻译：复用润色那一档的地址 / Key / 模型，只把 system prompt 换成翻译指令。
+    /// 与 polishTranscription 的关键差异是**失败时返回 nil 而非原文**——
+    /// 调用方需要区分"翻译成功"和"翻译失败"才能决定是否回滚输入框。
+    func translate(_ text: String, to target: TranslateTarget) async -> String? {
+        let baseURL = polishAPIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiKey = polishAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = polishModelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !baseURL.isEmpty, !model.isEmpty else {
+            HotkeyFileLog.shared.log("translate: skipped (missing baseURL/model)")
+            return nil
+        }
+
+        let systemPrompt = "将用户给出的文本翻译为\(target.promptName)。只输出译文，不要解释、不要添加任何内容。"
+        let normalizedBase = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
+        guard let url = URL(string: normalizedBase)?.appendingPathComponent("chat/completions") else {
+            HotkeyFileLog.shared.log("translate: invalid baseURL")
+            return nil
+        }
+
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if !apiKey.isEmpty {
+            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        let body: [String: Any] = [
+            "model": model,
+            "temperature": 0.2,
+            "messages": [
+                ["role": "system", "content": systemPrompt],
+                ["role": "user", "content": text]
+            ]
+        ]
+        guard let payload = try? JSONSerialization.data(withJSONObject: body) else { return nil }
+        request.httpBody = payload
+
+        do {
+            let (data, _) = try await URLSession.shared.data(for: request)
+            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let choices = json["choices"] as? [[String: Any]],
+                  let message = choices.first?["message"] as? [String: Any],
+                  let content = message["content"] as? String else {
+                HotkeyFileLog.shared.log("translate: unexpected response format")
+                return nil
+            }
+            let translated = content.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !translated.isEmpty else {
+                HotkeyFileLog.shared.log("translate: empty result")
+                return nil
+            }
+            HotkeyFileLog.shared.log("translate: ok (\(target.rawValue)), length \(text.count) -> \(translated.count)")
+            return translated
+        } catch {
+            HotkeyFileLog.shared.log("translate: failed — \(error.localizedDescription)")
+            return nil
         }
     }
 

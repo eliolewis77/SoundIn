@@ -8,6 +8,8 @@ enum VoiceInputPhase {
     case idle
     case recording
     case transcribing
+    /// 连击翻译请求进行中（HUD 显示进度，不显示声波）
+    case translating
     case success
     case clipboardFallback
     case cancelled
@@ -67,10 +69,11 @@ struct SoundInApp: App {
 
     private var statusText: String {
         switch phase {
-        case .idle: "就绪 · \(HotkeyInputManager.shared.displayShortcut)"
-        case .recording: "正在录音…"
-        case .transcribing: "正在转写…"
-        case .success: "已输入到光标"
+            case .idle: "就绪 · \(HotkeyInputManager.shared.displayShortcut)"
+            case .recording: "正在录音…"
+            case .transcribing: "正在转写…"
+            case .translating: "正在翻译…"
+            case .success: "已输入到光标"
         case .clipboardFallback: "已复制，请手动粘贴"
         case .cancelled: "已取消"
         case .permissionDenied(let message), .failure(let message): message
@@ -121,10 +124,11 @@ struct SoundInApp: App {
 
     private var statusIcon: String {
         switch phase {
-        case .idle: "waveform"
-        case .recording: "mic.fill"
-        case .transcribing: "ellipsis.bubble"
-        case .success: "checkmark.circle.fill"
+            case .idle: "waveform"
+            case .recording: "mic.fill"
+            case .transcribing: "ellipsis.bubble"
+            case .translating: "character.book.closed.fill"
+            case .success: "checkmark.circle.fill"
         case .clipboardFallback: "doc.on.doc.fill"
         case .cancelled: "xmark.circle.fill"
         case .permissionDenied, .failure: "exclamationmark.triangle.fill"
@@ -209,6 +213,12 @@ private struct SettingsView: View {
     @State private var isTestingPolishConnection = false
     @State private var isConfirmingClearHistory = false
     @State private var sidebarVisible = true
+    // 连击翻译触发键录制状态
+    @State private var isCapturingTranslateKey = false
+    @State private var translateKeyError: String?
+    @State private var translateKey: UInt16 = HotkeyInputManager.shared.translateKey
+    @State private var translateTapCount: Int = HotkeyInputManager.shared.translateTapCount
+    @State private var translateInterval: Double = HotkeyInputManager.shared.translateInterval
 
     var body: some View {
         HStack(spacing: 0) {
@@ -683,6 +693,90 @@ private struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+
+        // ── 连击翻译：复用上方同一档接口配置，只换一条翻译指令 ──
+        Section("翻译") {
+            Toggle("启用连击翻译", isOn: $speech.translateEnabled)
+                .onChange(of: speech.translateEnabled) { _, _ in
+                    if !speech.translateEnabled { stopTranslateKeyCapture() }
+                }
+
+            if speech.translateEnabled {
+                HStack {
+                    Text("触发键")
+                    Spacer()
+                    Button(isCapturingTranslateKey ? "请按键…（Esc 取消）" : HotkeyInputManager.Shortcut.keyName(translateKey)) {
+                        toggleTranslateKeyCapture()
+                    }
+                }
+
+                Picker("连击次数", selection: $translateTapCount) {
+                    Text("2 次").tag(2)
+                    Text("3 次").tag(3)
+                    Text("4 次").tag(4)
+                    Text("5 次").tag(5)
+                }
+                .onChange(of: translateTapCount) { _, newValue in
+                    HotkeyInputManager.shared.translateTapCount = newValue
+                }
+
+                Picker("间隔上限", selection: $translateInterval) {
+                    Text("0.4 秒").tag(0.4)
+                    Text("0.6 秒").tag(0.6)
+                    Text("0.9 秒").tag(0.9)
+                }
+                .onChange(of: translateInterval) { _, newValue in
+                    HotkeyInputManager.shared.translateInterval = newValue
+                }
+
+                Picker("目标语言", selection: $speech.translateTarget) {
+                    ForEach(TranslateTarget.allCases) { target in
+                        Text(target.rawValue).tag(target)
+                    }
+                }
+
+                if let translateKeyError {
+                    Text(translateKeyError)
+                        .font(.footnote)
+                        .foregroundStyle(.red)
+                }
+
+                Text("在输入框里连按触发键到设定次数即翻译：有选区则替换选区，没有选区则替换全部。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    // MARK: - 连击翻译触发键录制
+
+    private func toggleTranslateKeyCapture() {
+        if isCapturingTranslateKey {
+            stopTranslateKeyCapture()
+            return
+        }
+        translateKeyError = nil
+        isCapturingTranslateKey = true
+        HotkeyInputManager.shared.onTriggerKeyCaptureComplete = { code in
+            isCapturingTranslateKey = false
+            translateKeyError = nil
+            translateKey = code
+            HotkeyInputManager.shared.translateKey = code
+        }
+        HotkeyInputManager.shared.onTriggerKeyCaptureCancelled = {
+            isCapturingTranslateKey = false
+        }
+        HotkeyInputManager.shared.beginTriggerKeyCapture(
+            onReject: { message in
+                // 非法键不结束录制：按钮保持"请按键…"，用户直接重按即可
+                translateKeyError = message
+            }
+        )
+    }
+
+    private func stopTranslateKeyCapture() {
+        isCapturingTranslateKey = false
+        HotkeyInputManager.shared.endTriggerKeyCapture()
     }
 
     // MARK: - 录音测试

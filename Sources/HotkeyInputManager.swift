@@ -127,14 +127,32 @@ final class HotkeyInputManager {
             return modifierText + Self.keyName(keyCode)
         }
 
-        private static func keyName(_ code: UInt16) -> String {
-            let names: [UInt16: String] = [
-                49: "Space", 96: "F5", 97: "F6", 98: "F7", 99: "F3", 100: "F8",
-                101: "F9", 109: "F10", 103: "F11", 111: "F12",
-                18: "1", 19: "2", 20: "3", 21: "4", 23: "5"
-            ]
-            return names[code] ?? "Key \(code)"
+        /// 键码 → 显示名。原实现只映射了 Space / F1–F12 / 数字 1–5，
+        /// 其余一律显示成 "Key 35"——连击翻译的触发键要让用户能挑字母数字标点，
+        /// 这里补全成完整常用键位表。未知键码仍回退到 "Key N"。
+        static func keyName(_ code: UInt16) -> String {
+            if let name = keyNames[code] { return name }
+            return "Key \(code)"
         }
+
+        /// 键名表。internal 而非 private：连击翻译的触发键白名单要查它。
+        static let keyNames: [UInt16: String] = [
+            // 字母（ANSI 键位）
+            0: "A", 1: "S", 2: "D", 3: "F", 4: "H", 5: "G", 6: "Z", 7: "X",
+            8: "C", 9: "V", 11: "B", 12: "Q", 13: "W", 14: "E", 15: "R",
+            16: "Y", 17: "T", 31: "O", 32: "U", 34: "I", 35: "P", 37: "L",
+            38: "J", 40: "K", 45: "N", 46: "M",
+            // 数字行
+            18: "1", 19: "2", 20: "3", 21: "4", 22: "6", 23: "5",
+            25: "9", 26: "7", 28: "8", 29: "0",
+            // 标点
+            24: "=", 27: "-", 30: "]", 33: "[", 39: "'", 41: ";",
+            42: "\\", 43: ",", 44: "/", 47: ".", 50: "`",
+            // 功能键
+            96: "F5", 97: "F6", 98: "F7", 99: "F3", 100: "F8", 101: "F9",
+            103: "F11", 109: "F10", 111: "F12",
+            49: "Space"
+        ]
     }
 
     private var globalMonitor: Any?
@@ -181,9 +199,73 @@ final class HotkeyInputManager {
         }
     }
 
+    // MARK: - 连击翻译触发设置
+
+    /// 连击翻译的触发键（纯按键，不带修饰键）。默认 Space。
+    var translateKey: UInt16 = {
+        let raw = UserDefaults.standard.object(forKey: "voiceInputTranslateKey") as? Int
+        guard let raw, HotkeyInputManager.isAllowedTranslateKey(UInt16(truncatingIfNeeded: raw)) else {
+            return UInt16(kVK_Space)
+        }
+        return UInt16(truncatingIfNeeded: raw)
+    }() {
+        didSet { UserDefaults.standard.set(Int(translateKey), forKey: "voiceInputTranslateKey") }
+    }
+
+    /// 连击到该次数即触发翻译。默认 3。
+    var translateTapCount: Int = {
+        let raw = UserDefaults.standard.object(forKey: "voiceInputTranslateTapCount") as? Int ?? 3
+        return min(5, max(2, raw))
+    }() {
+        didSet { UserDefaults.standard.set(translateTapCount, forKey: "voiceInputTranslateTapCount") }
+    }
+
+    /// 相邻两次按键的最大间隔，超时则重新计数。默认 0.6 秒。
+    var translateInterval: TimeInterval = {
+        let raw = UserDefaults.standard.object(forKey: "voiceInputTranslateInterval") as? Double ?? 0.6
+        return min(2.0, max(0.3, raw))
+    }() {
+        didSet { UserDefaults.standard.set(translateInterval, forKey: "voiceInputTranslateInterval") }
+    }
+
+    /// 触发键合法白名单：只放"按下后只会往输入框里插字符"的键。
+    /// Return/Tab/Esc/删除键/方向键/F 键/修饰键全部排除——它们在翻译开始前
+    /// 就已经改变了输入状态（提交表单、切焦点、删内容），无法用后续写回补救。
+    static func isAllowedTranslateKey(_ code: UInt16) -> Bool {
+        Shortcut.keyNames[code] != nil && !Self.forbiddenTranslateKeys.contains(code)
+    }
+
+    private static let forbiddenTranslateKeys: Set<UInt16> = [
+        36,   // Return
+        48,   // Tab
+        51,   // Delete
+        53,   // Escape
+        115,  // Home
+        116,  // PageUp
+        117,  // Forward Delete
+        119,  // End
+        121,  // PageDown
+        123, 124, 125, 126, // 方向键
+        96, 97, 98, 99, 100, 101, 103, 109, 111, // F3 / F5…F12
+        118, 120, 122 // F4 / F2 / F1
+    ]
+
+    /// 候选触发键 candidate 是否与某个语音快捷键撞键。
+    /// 必须传 candidate 而不是拿当前 translateKey 比——录制时 translateKey 还没更新，
+    /// 拿旧值比会漏掉"用户正在录的键正好撞上"这种最该拦的情况。
+    /// 只算"纯单键"快捷键：带修饰键的（如 ⌘Space）不会吞掉裸键，不构成冲突。
+    func translateKeyConflicts(with shortcut: Shortcut, candidate: UInt16? = nil) -> Bool {
+        let key = candidate ?? translateKey
+        return shortcut.keyCode == key && shortcut.modifiers.isEmpty
+    }
+
     var onStateChange: ((VoiceInputPhase) -> Void)?
 
     static var isShortcutCaptureActive = false
+
+    /// 连击翻译触发键录制中。与 isShortcutCaptureActive 分开：
+    /// 后者会让常驻 handleKeyEvent 直接返回 false，两者语义不同、作用域也不同。
+    static var isTriggerKeyCaptureActive = false
 
     // 录制快捷键使用独立的监视器，避免覆盖 start() 的常驻监听
     private var captureGlobalMonitor: Any?
@@ -234,6 +316,83 @@ final class HotkeyInputManager {
         HotkeyFileLog.shared.log("capture cancelled programmatically")
         endSystemCapture()
     }
+
+    // MARK: - 连击翻译触发键录制
+
+    /// 录制触发键期间的回调。非法键会走 onRejected，录制**不结束**，用户可直接重按。
+    private var triggerKeyCaptureReject: ((String) -> Void)?
+
+    /// 开始录制连击翻译的触发键。与快捷键录制的区别：
+    /// 1. 不接受修饰键（带修饰键的组合一律拒绝）
+    /// 2. 撞语音快捷键 → 拒绝，提示换键
+    /// 3. 非法键（Return/Tab/方向键/F 键…）→ 拒绝，保持录制态
+    /// 完成/取消都通过 onTriggerKeyCaptureComplete / onTriggerKeyCaptureCancelled 回调。
+    func beginTriggerKeyCapture(onReject: @escaping (String) -> Void) {
+        endTriggerKeyCapture()
+        logger.notice("translate key capture begin")
+        HotkeyFileLog.shared.log("translate-key capture begin")
+        Self.isTriggerKeyCaptureActive = true
+        triggerKeyCaptureReject = onReject
+
+        captureGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            Task { @MainActor in
+                self?.handleTriggerKeyCapture(event)
+            }
+        }
+        captureLocalMonitor = NSEvent.addLocalMonitorForEvents(matching: [.keyDown]) { [weak self] event in
+            let captured = event
+            Task { @MainActor in
+                self?.handleTriggerKeyCapture(captured)
+            }
+            return nil
+        }
+    }
+
+    func endTriggerKeyCapture() {
+        if let captureGlobalMonitor { NSEvent.removeMonitor(captureGlobalMonitor) }
+        if let captureLocalMonitor { NSEvent.removeMonitor(captureLocalMonitor) }
+        captureGlobalMonitor = nil
+        captureLocalMonitor = nil
+        Self.isTriggerKeyCaptureActive = false
+        triggerKeyCaptureReject = nil
+        HotkeyFileLog.shared.log("translate-key capture ended")
+    }
+
+    private func handleTriggerKeyCapture(_ event: NSEvent) {
+        guard Self.isTriggerKeyCaptureActive else { return }
+        guard !event.isARepeat else { return }
+        let code = event.keyCode
+
+        // Esc 取消
+        if code == UInt16(kVK_Escape) {
+            endTriggerKeyCapture()
+            onTriggerKeyCaptureCancelled?()
+            return
+        }
+        // 修饰键单独按下走 flagsChanged，keyDown 阶段不会到这里；这里只挡"带修饰键的组合"
+        let hasModifier = !event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty
+        if hasModifier {
+            triggerKeyCaptureReject?("触发键不支持带修饰键，请直接按一个字母、数字或空格")
+            return
+        }
+        guard Self.isAllowedTranslateKey(code) else {
+            let name = Shortcut.keyName(code)
+            triggerKeyCaptureReject?("「\(name)」会改变输入状态，请改用字母、数字或标点")
+            return
+        }
+        if let clash = [clickShortcut, holdShortcut].first(where: { translateKeyConflicts(with: $0, candidate: code) }) {
+            triggerKeyCaptureReject?("「\(clash.displayText)」已被语音快捷键占用，请换一个键")
+            return
+        }
+
+        HotkeyFileLog.shared.log("translate-key captured: \(code)")
+        endTriggerKeyCapture()
+        onTriggerKeyCaptureComplete?(code)
+    }
+
+    /// 触发键录制完成回调（由设置页注入；单独存放以避免与 begin 系统参数耦合）
+    var onTriggerKeyCaptureComplete: ((UInt16) -> Void)?
+    var onTriggerKeyCaptureCancelled: (() -> Void)?
 
     private func finishSystemCapture(with event: NSEvent) {
         guard isCaptureMode else { return }
@@ -364,6 +523,17 @@ final class HotkeyInputManager {
         guard let axElement = focusedAXElement(frontmostPID: frontmostPID) else { return nil }
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(axElement, kAXSelectedTextAttribute as CFString, &value) == .success,
+              let text = value as? String, !text.isEmpty else { return nil }
+        return text
+    }
+
+    /// 读取焦点元素（文本框 / 文本区）的全部内容。终端、游戏、PDF 阅读器等
+    /// 不暴露 kAXValue，返回 nil——此时翻译功能直接放弃，不发请求。
+    nonisolated static func focusedElementText(frontmostPID: pid_t? = nil) -> String? {
+        guard AXIsProcessTrusted() else { return nil }
+        guard let axElement = focusedAXElement(frontmostPID: frontmostPID) else { return nil }
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &value) == .success,
               let text = value as? String, !text.isEmpty else { return nil }
         return text
     }
@@ -595,7 +765,163 @@ final class HotkeyInputManager {
             else if event.type == .keyUp { release(.hold) }
             return true
         }
+
+        // ── 连击翻译：只观察不吞事件（方案 B）──
+        // 放在快捷键判定之后：撞键时按键已被 Carbon/NSEvent 路径处理，这里不再参与。
+        if event.type == .keyDown {
+            observeTapForTranslate(event)
+        }
         return false
+    }
+
+    // MARK: - 连击翻译：计数与触发
+
+    /// 连击计数状态。选中文本在第 1 次按下时记下——此时用户还没开始敲，
+    /// 记下的是"翻译前的干净状态"。但方案 B 不吞按键，第 1 次空格就会覆盖掉选区，
+    /// 所以触发时读到的往往已是残缺状态，真正可信的是这份快照。
+    /// 内部计数器叫 translateTapStreak，与设置项 translateTapCount 区分开。
+    private var translateTapStreak = 0
+    private var translateLastTapTime: TimeInterval = 0
+    private var translateAnchorText: String?
+    private var isTranslating = false
+
+    private func resetTranslateTaps() {
+        translateTapStreak = 0
+        translateLastTapTime = 0
+        translateAnchorText = nil
+    }
+
+    /// 处理一次 keyDown：命中触发键则累加计数，任何其他键都会清零。
+    /// 清零规则是防误触的关键——触发键改成字母后，"apple" 里的 p 因夹了别的键不会累计。
+    private func observeTapForTranslate(_ event: NSEvent) {
+        guard SpeechManager.shared.translateEnabled, !isCaptureMode,
+              !Self.isShortcutCaptureActive, !Self.isTriggerKeyCaptureActive else {
+            return
+        }
+        // 录音进行中不触发：此时用户可能在用空格推进录音流程
+        guard !isActive else { return }
+
+        let now = ProcessInfo.processInfo.systemUptime
+        let isTriggerKey = event.keyCode == translateKey
+            && event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty
+
+        guard isTriggerKey else {
+            if translateTapStreak > 0 { resetTranslateTaps() }
+            return
+        }
+        guard !isTranslating else { return }
+
+        // 超时则从 1 重新数起（不是继续累加，避免"1 + 超时 + 1"被算成两次）
+        if now - translateLastTapTime > translateInterval {
+            translateTapStreak = 0
+            translateAnchorText = nil
+        }
+        translateLastTapTime = now
+        translateTapStreak += 1
+
+        if translateTapStreak == 1 {
+            let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+            translateAnchorText = Self.focusedSelectedText(frontmostPID: pid)
+            HotkeyFileLog.shared.log("translate: tap 1/\(translateTapCount) anchorChars=\(translateAnchorText?.count ?? 0)")
+        } else {
+            HotkeyFileLog.shared.log("translate: tap \(translateTapStreak)/\(translateTapCount)")
+        }
+
+        guard translateTapStreak >= translateTapCount else { return }
+        let anchorText = translateAnchorText
+        let typedCount = translateTapStreak
+        resetTranslateTaps()
+        Task { [weak self] in
+            await self?.performTranslate(anchorText: anchorText, typedCount: typedCount)
+        }
+    }
+
+    /// 真正的执行体：读原文 → 调 API → 写回。
+    ///
+    /// 写回为什么是"退格 + 粘贴"而不是"恢复选区 + 粘贴"：方案 B 不吞按键，
+    /// **第 1 次空格就已经把原选区覆盖掉了**（macOS 文本视图中打字会替换选区），
+    /// 此刻记下来的 range 早已失效，硬写回去反而会错位。
+    /// 可靠做法是利用"敲出来的字符就在光标前"这一事实：
+    /// - 触发前有选区 → 原文取第 1 次按下时的文本快照；退格清掉 N 个空格后粘贴，光标自然回到原位
+    /// - 触发前无选区 → 原文是整个输入框（末尾的 N 个空格会被 trim 掉）；⌘A 全选后粘贴
+    /// 两种情况都只依赖光标位置，不需要 AX 写选区（很多 App 根本不支持写 range）。
+    private func performTranslate(anchorText: String?, typedCount: Int) async {
+        guard !isTranslating else { return }
+        guard AXIsProcessTrusted() else {
+            onStateChange?(.permissionDenied(message: "需要在辅助功能中授权 SoundIn"))
+            return
+        }
+        isTranslating = true
+        defer { isTranslating = false }
+
+        // AX 查询在主线程执行（带 0.3s 超时），后台线程读不可靠
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let hadSelection = anchorText?.isEmpty == false
+        let source: String
+        if hadSelection {
+            source = anchorText ?? ""
+        } else if let full = Self.focusedElementText(frontmostPID: pid) {
+            source = full
+        } else {
+            HotkeyFileLog.shared.log("translate: no readable text — abort")
+            onStateChange?(.failure(message: "未识别到可翻译内容"))
+            return
+        }
+
+        let trimmed = source.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else {
+            // 没什么可翻的：把刚敲的空格退掉，别留残渣
+            HotkeyFileLog.shared.log("translate: empty source — rollback \(typedCount) chars")
+            deleteTypedCharacters(typedCount)
+            return
+        }
+
+        onStateChange?(.translating)
+        let target = SpeechManager.shared.translateTarget
+        guard let translated = await SpeechManager.shared.translate(trimmed, to: target) else {
+            HotkeyFileLog.shared.log("translate: failed — rolling back \(typedCount) typed chars")
+            deleteTypedCharacters(typedCount)
+            onStateChange?(.failure(message: "翻译失败"))
+            return
+        }
+
+        if hadSelection {
+            // 退格清掉敲出来的空格，光标回到原选区起点，再粘贴译文。
+            // CGEvent.post 是异步投递的，目标应用还没消化完退格就粘贴会错位，等一下。
+            deleteTypedCharacters(typedCount)
+            try? await Task.sleep(for: .milliseconds(120))
+        } else {
+            sendSelectAllShortcut()
+            try? await Task.sleep(for: .milliseconds(60))
+        }
+        onStateChange?(.idle)
+        let inserted = await paste(translated)
+        HotkeyFileLog.shared.log("translate: pasted len=\(translated.count) mode=\(hadSelection ? "selection" : "all") ok=\(inserted)")
+        if !inserted {
+            onStateChange?(.clipboardFallback)
+        }
+    }
+
+    /// 翻译失败时删掉刚才敲出来的字符。发 N 次退格。
+    private func deleteTypedCharacters(_ count: Int) {
+        guard count > 0 else { return }
+        guard let source = CGEventSource(stateID: .hidSystemState) else { return }
+        for _ in 0..<count {
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: false) else { return }
+            down.post(tap: .cghidEventTap)
+            up.post(tap: .cghidEventTap)
+        }
+    }
+
+    private func sendSelectAllShortcut() {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { return }
+        keyDown.flags = .maskCommand
+        keyUp.flags = .maskCommand
+        keyDown.post(tap: .cghidEventTap)
+        keyUp.post(tap: .cghidEventTap)
     }
 
     /// 纯修饰键热键的按下/松开判定（单击 = 松开时切换；长按 = 按下即开始、松开即停）

@@ -7,6 +7,8 @@ import SwiftUI
 enum VoiceInputHUDPhase {
     case recording
     case transcribing
+    /// 连击翻译进行中：与 transcribing 共用进度条，但文案与图标不同
+    case translating
     case cancelled
     case failure(message: String)
 }
@@ -41,6 +43,8 @@ final class VoiceInputHUDManager {
             show()
         case .transcribing:
             update(phase: .transcribing, message: "识别中")
+        case .translating:
+            update(phase: .translating, message: "翻译中")
         case .success, .clipboardFallback:
             if case .success = voicePhase {
                 // 方案 C：成功静默，立即淡出
@@ -166,8 +170,10 @@ final class VoiceInputHUDManager {
 
     // MARK: - 模拟进度（方案三：识别中匀速填充到 90%，出结果立即结束）
     private func isTranscribingPhase(_ phase: VoiceInputHUDPhase) -> Bool {
-        if case .transcribing = phase { return true }
-        return false
+        switch phase {
+        case .transcribing, .translating: return true
+        default: return false
+        }
     }
 
     private func startProgressSimulation() {
@@ -269,8 +275,8 @@ struct VoiceInputCapsuleView: View {
     @ViewBuilder
     private var capsuleBody: some View {
         ZStack {
-            // 识别中：进度填充条（reme 样式，从左往右覆盖胶囊）
-            if case .transcribing = manager.phase {
+            // 识别中 / 翻译中：进度填充条（reme 样式，从左往右覆盖胶囊）
+            if isProgressPhase(manager.phase) {
                 GeometryReader { proxy in
                     Rectangle()
                         .fill(Color.green.opacity(0.38))
@@ -344,7 +350,7 @@ struct VoiceInputCapsuleView: View {
                 .frame(width: 24, height: 14)
             }
 
-        case .transcribing:
+        case .transcribing, .translating:
             Text("\(Int(manager.progress * 100))%")
                 .font(.system(size: 10, weight: .bold, design: .rounded))
                 .monospacedDigit()
@@ -387,8 +393,17 @@ struct VoiceInputCapsuleView: View {
         switch manager.phase {
         case .recording: 0
         case .transcribing: 1
+        case .translating: 4
         case .cancelled: 2
         case .failure: 3
+        }
+    }
+
+    /// 进度条态：识别中与翻译中共用同一套填充动画
+    private func isProgressPhase(_ phase: VoiceInputHUDPhase) -> Bool {
+        switch phase {
+        case .transcribing, .translating: return true
+        default: return false
         }
     }
 }
