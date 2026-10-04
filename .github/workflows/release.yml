@@ -13,6 +13,12 @@ name: Release
 #   MACOS_NOTARIZE_KEY_ID     API Key ID（如 "ABCDE12345"）
 #   MACOS_NOTARIZE_ISSUER     Issuer ID（UUID）
 # 未配置这些密钥时，自动退回临时签名（ad-hoc），仍可发版但别人下载后需手动绕开 Gatekeeper。
+#
+# Sparkle 自动更新：
+#   SPARKLE_PRIVATE_KEY       EdDSA 私钥（Sparkle 的 generate_keys -x 导出，base64 编码字符串）
+#                             必须配置，否则签名步骤跳过、appcast 不含签名，客户端会拒绝安装更新。
+#   SPARKLE_PUBLIC_ED_KEY     对应公钥（可选；不设时用 Info.plist 里已写死的 SUPublicEDKey）
+# appcast.xml 发布到 gh-pages 分支，客户端从 https://eliolewis77.github.io/SoundIn/appcast.xml 拉取。
 on:
   push:
     branches: [main]
@@ -110,3 +116,62 @@ jobs:
             --title "v${{ steps.version.outputs.version }}" \
             --generate-notes \
             "$ARTIFACT"
+
+      # ── Sparkle 自动更新 ──
+      # 依赖 generate_appcast：它会对 zip 做 EdDSA 签名并生成 appcast.xml。
+      # 公钥必须与 Info.plist 的 SUPublicEDKey 一致，否则客户端拒绝安装。
+      - name: Set up Sparkle tools
+        if: steps.check.outputs.exists == 'false'
+        run: |
+          SPARKLE_VERSION="2.10.0"
+          curl -sL --max-time 120 -o /tmp/sparkle.tar.xz \
+            "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
+          mkdir -p /tmp/sparkle-tools
+          tar -xJf /tmp/sparkle.tar.xz -C /tmp/sparkle-tools
+          /tmp/sparkle-tools/bin/generate_appcast --version
+
+      - name: Sign update and generate appcast
+        if: steps.check.outputs.exists == 'false'
+        env:
+          SPARKLE_PRIVATE_KEY_B64: ${{ secrets.SPARKLE_PRIVATE_KEY }}
+        run: |
+          if [ -z "$SPARKLE_PRIVATE_KEY_B64" ]; then
+            echo "::warning::SPARKLE_PRIVATE_KEY 未配置，跳过 appcast 生成（自动更新不可用）"
+            exit 0
+          fi
+          echo "$SPARKLE_PRIVATE_KEY_B64" | base64 --decode > /tmp/sparkle_private_key
+          chmod 600 /tmp/sparkle_private_key
+          cd .build-cache/app
+          # generate_appcast 对目录里的 zip 做 EdDSA 签名并写出 appcast.xml。
+          # enclosure URL 由它按 feed 地址自动推导（固定为 <feed目录>/SoundIn.app.zip），
+          # 所以 zip 必须与 appcast.xml 一起平铺发布在 Pages 根目录，不能再套一层目录。
+          /tmp/sparkle-tools/bin/generate_appcast \
+            --ed-key-file /tmp/sparkle_private_key \
+            .
+          rm -f /tmp/sparkle_private_key
+          echo "--- appcast.xml ---"
+          cat appcast.xml
+
+      - name: Publish appcast to gh-pages
+        if: steps.check.outputs.exists == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd .build-cache/app
+          if [ ! -f appcast.xml ]; then
+            echo "appcast.xml 不存在，跳过发布（未配置 SPARKLE_PRIVATE_KEY？）"
+            exit 0
+          fi
+          # 只提交 appcast.xml 与 zip：客户端只信任 Pages 这一个域名，
+          # 不必再去 Release 页取更新包
+          git init -q .
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -q -B gh-pages
+          git add appcast.xml SoundIn.app.zip
+          git commit -q -m "appcast: v${{ steps.version.outputs.version }}" || {
+            echo "没有变更，跳过推送"; exit 0; }
+          git push -q --force \
+            "https://x-access-token:$GH_TOKEN@github.com/${{ github.repository }}.git" \
+            gh-pages
+          echo "appcast published to gh-pages"

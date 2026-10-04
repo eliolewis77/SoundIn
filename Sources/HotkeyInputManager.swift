@@ -565,7 +565,9 @@ final class HotkeyInputManager {
 
         globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .keyUp, .flagsChanged]) { [weak self] event in
             Task { @MainActor in
-                guard let self, self.shouldHandleEvent(event) else { return }
+                guard let self else { return }
+                self.noteKeyEventReachability(event)
+                guard self.shouldHandleEvent(event) else { return }
                 self.handleKeyEvent(event)
             }
         }
@@ -575,6 +577,22 @@ final class HotkeyInputManager {
             if !self.shouldHandleEvent(event) { return event }
             if self.handleKeyEvent(event) { return nil }
             return event
+        }
+    }
+
+    /// 一次性探针：确认全局键盘监听是否真的收到了事件。
+    /// NSEvent 的全局键盘 monitor 在**没有辅助功能权限时静默不投递**（不报错、不崩溃），
+    /// 表现为"所有依赖 keyDown 的功能都没反应"，极难排查。这里启动后第一次收到
+    /// keyDown 就打一条，把"权限缺失"和"代码逻辑错"两种情况区分开。
+    private var hasLoggedKeyEventProbe = false
+
+    private func noteKeyEventReachability(_ event: NSEvent) {
+        guard !hasLoggedKeyEventProbe, event.type == .keyDown else { return }
+        hasLoggedKeyEventProbe = true
+        let ax = AXIsProcessTrusted()
+        HotkeyFileLog.shared.log("monitor: first keyDown observed, axTrusted=\(ax), translateEnabled=\(SpeechManager.shared.translateEnabled), translateKey=\(Shortcut.keyName(translateKey))")
+        if !ax {
+            HotkeyFileLog.shared.log("monitor: WARNING — 无辅助功能权限，全局键盘事件不会投递，语音快捷键与连击翻译均失效")
         }
     }
 
@@ -794,22 +812,35 @@ final class HotkeyInputManager {
     /// 处理一次 keyDown：命中触发键则累加计数，任何其他键都会清零。
     /// 清零规则是防误触的关键——触发键改成字母后，"apple" 里的 p 因夹了别的键不会累计。
     private func observeTapForTranslate(_ event: NSEvent) {
-        guard SpeechManager.shared.translateEnabled, !isCaptureMode,
-              !Self.isShortcutCaptureActive, !Self.isTriggerKeyCaptureActive else {
+        // 任何早退都要留痕：连击翻译"没反应"时，这是唯一能定位到具体哪道门卡住的地方
+        if !SpeechManager.shared.translateEnabled {
+            HotkeyFileLog.shared.log("translate: ignored (feature disabled)")
             return
         }
-        // 录音进行中不触发：此时用户可能在用空格推进录音流程
-        guard !isActive else { return }
+        if isActive {
+            HotkeyFileLog.shared.log("translate: ignored (recording in progress)")
+            return
+        }
+        if isCaptureMode || Self.isShortcutCaptureActive || Self.isTriggerKeyCaptureActive {
+            HotkeyFileLog.shared.log("translate: ignored (shortkey capture in progress)")
+            return
+        }
+        if isTranslating {
+            HotkeyFileLog.shared.log("translate: ignored (already translating)")
+            return
+        }
 
         let now = ProcessInfo.processInfo.systemUptime
         let isTriggerKey = event.keyCode == translateKey
             && event.modifierFlags.intersection(.deviceIndependentFlagsMask).isEmpty
 
         guard isTriggerKey else {
-            if translateTapStreak > 0 { resetTranslateTaps() }
+            if translateTapStreak > 0 {
+                HotkeyFileLog.shared.log("translate: streak reset by other key \(event.keyCode)")
+                resetTranslateTaps()
+            }
             return
         }
-        guard !isTranslating else { return }
 
         // 超时则从 1 重新数起（不是继续累加，避免"1 + 超时 + 1"被算成两次）
         if now - translateLastTapTime > translateInterval {

@@ -14,3 +14,7 @@ DerivedData/
 # 本地环境变量 / 密钥文件
 .env
 *.env
+
+# Sparkle EdDSA 私钥（只应存在于 Keychain 与 GitHub Secrets，绝不入库）
+.secrets/
+sparkle_private_key

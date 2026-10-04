@@ -38,6 +38,16 @@ struct SoundInApp: App {
                     NSApp.activate(ignoringOtherApps: true)
                 }
                 Divider()
+                // 自动更新：手动检查 + 自动检查开关
+                Button("检查更新…") {
+                    NSApp.activate(ignoringOtherApps: true)
+                    AppUpdater.shared.checkForUpdatesManually()
+                }
+                Toggle("自动检查更新", isOn: Binding(
+                    get: { AppUpdater.shared.automaticallyChecksForUpdates },
+                    set: { AppUpdater.shared.setAutomaticChecks($0) }
+                ))
+                Divider()
                 Button("退出") { NSApp.terminate(nil) }
             }
             .padding(8)
@@ -146,6 +156,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 把识别/润色各自选中的 API 配置档回写进 SpeechManager（升级迁移后保证活动值一致）
         APIProfileStore.shared.applyActive(to: SpeechManager.shared)
         HotkeyInputManager.shared.start()
+        // 自动更新：延迟几秒静默检查，失败不打扰用户
+        AppUpdater.shared.scheduleStartupCheck()
         HotkeyInputManager.shared.onStateChange = { newPhase in
             Task { @MainActor in
                 SoundInApp.currentPhase = newPhase
@@ -744,6 +756,14 @@ private struct SettingsView: View {
                 Text("在输入框里连按触发键到设定次数即翻译：有选区则替换选区，没有选区则替换全部。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
+
+                // 无辅助功能权限时 NSEvent 全局键盘 monitor 静默不投递事件，
+                // 表现是"按了完全没反应"且没有任何报错——必须在这里显式告知。
+                if !AXIsProcessTrusted() {
+                    Label("需要在「系统设置 → 隐私与安全性 → 辅助功能」中授权 SoundIn，否则无法监听按键。", systemImage: "exclamationmark.triangle.fill")
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                }
             }
         }
     }

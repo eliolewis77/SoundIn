@@ -26,5 +26,15 @@
     <string>SoundIn（声入）需要访问麦克风来录制并转写您的语音。</string>
     <key>NSSpeechRecognitionUsageDescription</key>
     <string>SoundIn（声入）使用语音识别技术将您的语音转换为文字。</string>
+	<!-- Sparkle 自动更新 -->
+	<key>SUFeedURL</key>
+	<string>https://eliolewis77.github.io/SoundIn/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>aguBT1OSIJcpNxGe8ufjDh7glQhfP/FYJ7XoUDL5Ljw=</string>
+	<!-- 启动时自动检查更新（延迟 3 秒由 AppUpdater 控制；最短检查间隔 24 小时） -->
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUUpdateInterval</key>
+	<integer>86400</integer>
 </dict>
 </plist>
