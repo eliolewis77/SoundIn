@@ -564,8 +564,14 @@ final class HotkeyInputManager {
     nonisolated static func focusedElementText(frontmostPID: pid_t? = nil) -> String? {
         guard AXIsProcessTrusted() else { return nil }
         guard let axElement = focusedAXElement(frontmostPID: frontmostPID) else { return nil }
+        return elementText(axElement)
+    }
+
+    /// 读取元素 kAXValue 的非空文本。已持有焦点元素的调用方直接用这个，
+    /// 省一次焦点查询的 AX 往返。
+    nonisolated static func elementText(_ element: AXUIElement) -> String? {
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axElement, kAXValueAttribute as CFString, &value) == .success,
+        guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
               let text = value as? String, !text.isEmpty else { return nil }
         return text
     }
@@ -939,15 +945,22 @@ final class HotkeyInputManager {
             return
         }
         isTranslating = true
-        defer { isTranslating = false }
+        defer {
+            isTranslating = false
+            // loading 指示器的 show 在下方 .translating 处；未 show 过的 hide 是空操作
+            InputFocusLoader.shared.hide()
+        }
 
         // AX 查询在主线程执行（带 0.3s 超时），后台线程读不可靠
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let hadSelection = anchorText?.isEmpty == false
+        // 焦点元素只查一次：读原文和 loading 指示器定位共用，避免重复 AX 往返
+        // （Electron 冷路径一次查询含无障碍树激活，可阻塞主线程 ~1s）
+        let focusElement = Self.focusedAXElement(frontmostPID: pid)
         let source: String
         if hadSelection {
             source = anchorText ?? ""
-        } else if let full = Self.focusedElementText(frontmostPID: pid) {
+        } else if let element = focusElement, let full = Self.elementText(element) {
             source = full
         } else {
             let appID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
@@ -965,6 +978,10 @@ final class HotkeyInputManager {
             return
         }
 
+        // 翻译期间在焦点输入框附近显示三点 loading。直触发场景（选中文本敲三下空格）
+        // 底部 HUD 不会出现，这个指示器是用户唯一的空间反馈；
+        // 传上面查好的 focusElement（可能为 nil，指示器内部静默跳过）。
+        InputFocusLoader.shared.show(element: focusElement)
         onStateChange?(.translating)
         let target = SpeechManager.shared.translateTarget
         guard let translated = await SpeechManager.shared.translate(trimmed, to: target) else {
