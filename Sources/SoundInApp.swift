@@ -253,6 +253,14 @@ private struct SettingsView: View {
     @State private var translateTapCount: Int = HotkeyInputManager.shared.translateTapCount
     @State private var translateInterval: Double = HotkeyInputManager.shared.translateInterval
 
+    /// 侧边栏自定义底色：比系统默认侧边栏材质浅一档，跟随深浅色模式
+    private static let sidebarBackground = Color(nsColor: NSColor(name: nil) { appearance in
+        let isDark = appearance.bestMatch(from: [.aqua, .darkAqua]) == .darkAqua
+        return isDark
+            ? NSColor(srgbRed: 58 / 255, green: 58 / 255, blue: 60 / 255, alpha: 1)   // #3A3A3C
+            : NSColor(srgbRed: 236 / 255, green: 237 / 255, blue: 240 / 255, alpha: 1) // #ECEDF0
+    })
+
     var body: some View {
         HStack(spacing: 0) {
             if sidebarVisible {
@@ -262,8 +270,10 @@ private struct SettingsView: View {
                     }
                 }
                 .listStyle(.sidebar)
+                // 替换系统侧边栏材质：深色模式下系统默认偏深灰，这里整体提亮一档
+                .scrollContentBackground(.hidden)
+                .background(Self.sidebarBackground)
                 .frame(minWidth: 130, idealWidth: 148, maxWidth: 176)
-                Divider()
             }
             Form {
                 switch selectedPage {
@@ -277,6 +287,9 @@ private struct SettingsView: View {
                 }
             }
             .formStyle(.grouped)
+            // 主体页背景改为白色（浅色模式下；深色模式仍跟随系统以免文字不可读）
+            .scrollContentBackground(.hidden)
+            .background(Color(nsColor: .controlBackgroundColor))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
         .toolbar {
