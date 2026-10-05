@@ -22,7 +22,8 @@ IDENTITY="Developer ID Application: TAO LIU ($TEAM)"
 NOTARY_PROFILE="${NOTARY_PROFILE:-nightcat-notary}"
 APP_NAME="SoundIn"
 STAGE="build-release"
-SPARKLE_BIN=".build/artifacts/sparkle/Sparkle/bin"
+# 必须绝对路径：第 4 步会 cd 进 staging 目录，相对路径会在那里失效
+SPARKLE_BIN="$PWD/.build/artifacts/sparkle/Sparkle/bin"
 
 VERSION=$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" Info.plist)
 BUILD_NUM=$(/usr/libexec/PlistBuddy -c "Print :CFBundleVersion" Info.plist)
