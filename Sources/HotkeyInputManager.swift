@@ -280,6 +280,9 @@ final class HotkeyInputManager {
         onCancel: @escaping () -> Void,
         onComplete: @escaping (UInt16, NSEvent.ModifierFlags) -> Void
     ) {
+        // 两种录制互斥：它们复用同一组 monitor 句柄，若不先结束对方，
+        // 后开始的会覆盖句柄导致先开始的泄漏、结束时会错删对方的监听
+        endTriggerKeyCapture()
         endSystemCapture()
         logger.notice("shortcut capture begin")
         HotkeyFileLog.shared.log("capture begin")
@@ -328,6 +331,8 @@ final class HotkeyInputManager {
     /// 3. 非法键（Return/Tab/方向键/F 键…）→ 拒绝，保持录制态
     /// 完成/取消都通过 onTriggerKeyCaptureComplete / onTriggerKeyCaptureCancelled 回调。
     func beginTriggerKeyCapture(onReject: @escaping (String) -> Void) {
+        // 与快捷键录制互斥（理由见 beginSystemCapture）
+        endSystemCapture()
         endTriggerKeyCapture()
         logger.notice("translate key capture begin")
         HotkeyFileLog.shared.log("translate-key capture begin")
@@ -479,6 +484,11 @@ final class HotkeyInputManager {
     /// 获取当前焦点应用的焦点 UI 元素。优先走调用方传入的前台应用 PID（主线程读取，
     /// 后台线程读 NSWorkspace.frontmostApplication 不可靠），失败再退回 systemWide。
     /// AX 查询带 0.3s 消息超时，即使应用无响应也不会长时间阻塞。
+    ///
+    /// Electron/Chromium 应用（VS Code、Slack、部分聊天工具）检测不到辅助功能客户端时
+    /// 完全不暴露焦点元素（err -25212 attributeUnsupported）。两级查询都失败时设置
+    /// AXManualAccessibility + AXEnhancedUserInterface 程序化激活，~0.5s 后重试一次。
+    /// 激活一次后该应用整个会话都保持可用，后续走快速路径。
     nonisolated static func focusedAXElement(frontmostPID: pid_t? = nil) -> AXUIElement? {
         guard AXIsProcessTrusted() else { return nil }
         if let frontmostPID {
@@ -494,8 +504,30 @@ final class HotkeyInputManager {
         AXUIElementSetMessagingTimeout(systemWide, 0.3)
         var focused: CFTypeRef?
         guard AXUIElementCopyAttributeValue(systemWide, kAXFocusedUIElementAttribute as CFString, &focused) == .success,
-              let element = focused else { return nil }
+              let element = focused else {
+            guard let frontmostPID else { return nil }
+            activateElectronAccessibility(pid: frontmostPID)
+            // Electron 异步构建无障碍树，实测 ~0.5s 生效；只重试一次，
+            // 仍失败就放弃，用户下次触发时树已建好走快速路径
+            Thread.sleep(forTimeInterval: 0.6)
+            let retryElement = AXUIElementCreateApplication(frontmostPID)
+            AXUIElementSetMessagingTimeout(retryElement, 0.3)
+            var retried: CFTypeRef?
+            if AXUIElementCopyAttributeValue(retryElement, kAXFocusedUIElementAttribute as CFString, &retried) == .success,
+               let element = retried {
+                return element as! AXUIElement
+            }
+            return nil
+        }
         return element as! AXUIElement
+    }
+
+    /// 激活 Electron/Chromium 应用的无障碍树。两个属性都设是惯例写法：
+    /// Chromium 响应 AXEnhancedUserInterface，Electron 响应 AXManualAccessibility。
+    nonisolated private static func activateElectronAccessibility(pid: pid_t) {
+        let appElement = AXUIElementCreateApplication(pid)
+        AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
+        AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
     }
 
     /// 通过辅助功能 API 检测焦点元素是否有非空选区。纯 AX 查询，可在后台线程执行。
@@ -541,6 +573,26 @@ final class HotkeyInputManager {
     /// 句子终止标点（句号/问号/叹号/省略号）：替换场景中句尾标点跟随原选中文本
     private static func isSentenceTerminator(_ c: Character) -> Bool {
         "。！？!?…".contains(c)
+    }
+
+    /// 翻译 abort 时的诊断串：焦点元素角色 + kAXValue 结果/错误码。
+    /// 用于区分「目标应用不暴露 AXValue（如终端）」和「焦点元素根本没拿到」。
+    nonisolated static func diagnoseFocusedElement(frontmostPID: pid_t?) -> String {
+        guard AXIsProcessTrusted() else { return "ax-untrusted" }
+        guard let element = focusedAXElement(frontmostPID: frontmostPID) else { return "no-focused-element" }
+        var roleRef: CFTypeRef?
+        let roleErr = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef)
+        let role = roleErr == .success ? (roleRef as? String ?? "?") : "role-err-\(roleErr.rawValue)"
+        var valueRef: CFTypeRef?
+        let valueErr = AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &valueRef)
+        let valueDesc: String
+        if valueErr == .success {
+            if let text = valueRef as? String { valueDesc = "value=\(text.count)chars" }
+            else { valueDesc = "value-type-\(CFGetTypeID(valueRef))" }
+        } else {
+            valueDesc = "value-err-\(valueErr.rawValue)"
+        }
+        return "role=\(role) \(valueDesc)"
     }
 
     /// 同一物理按键可能被 global + local 两个 monitor 重复投递。按 (类型+键码+修饰+时间戳) 去重，
@@ -812,9 +864,13 @@ final class HotkeyInputManager {
     /// 处理一次 keyDown：命中触发键则累加计数，任何其他键都会清零。
     /// 清零规则是防误触的关键——触发键改成字母后，"apple" 里的 p 因夹了别的键不会累计。
     private func observeTapForTranslate(_ event: NSEvent) {
-        // 任何早退都要留痕：连击翻译"没反应"时，这是唯一能定位到具体哪道门卡住的地方
+        // 功能关闭时静默早退：这里在全局键盘监听的热路径上，每个按键都会进来，
+        // 打日志等于把用户全部击键节奏写进磁盘文件（性能与隐私都不接受）。
         if !SpeechManager.shared.translateEnabled {
-            HotkeyFileLog.shared.log("translate: ignored (feature disabled)")
+            return
+        }
+        // 听写收尾（转写/润色进行中）时不启动翻译：两条粘贴管线交错会互相覆盖输出
+        if isFinishing {
             return
         }
         if isActive {
@@ -894,7 +950,9 @@ final class HotkeyInputManager {
         } else if let full = Self.focusedElementText(frontmostPID: pid) {
             source = full
         } else {
-            HotkeyFileLog.shared.log("translate: no readable text — abort")
+            let appID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
+            let diagnosis = Self.diagnoseFocusedElement(frontmostPID: pid)
+            HotkeyFileLog.shared.log("translate: no readable text — abort app=\(appID) \(diagnosis)")
             onStateChange?(.failure(message: "未识别到可翻译内容"))
             return
         }
@@ -910,9 +968,22 @@ final class HotkeyInputManager {
         onStateChange?(.translating)
         let target = SpeechManager.shared.translateTarget
         guard let translated = await SpeechManager.shared.translate(trimmed, to: target) else {
-            HotkeyFileLog.shared.log("translate: failed — rolling back \(typedCount) typed chars")
-            deleteTypedCharacters(typedCount)
+            // 失败回滚同样要先确认焦点：API 等待期间切走的话，退格会删掉别的应用里的字
+            if isFocusStillValid(pid) {
+                HotkeyFileLog.shared.log("translate: failed — rolling back \(typedCount) typed chars")
+                deleteTypedCharacters(typedCount)
+            }
             onStateChange?(.failure(message: "翻译失败"))
+            return
+        }
+
+        // 写回前的最后防线：翻译要等几秒，期间用户可能已经切到别的应用/输入框。
+        // 此时退格 / ⌘A / ⌘V 会打在无关内容上（Finder 全选文件、终端粘贴译文），
+        // 宁可放弃写回也不覆盖别人的内容。译文进剪贴板兜底，成果不丢。
+        guard isFocusStillValid(pid) else {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(translated, forType: .string)
+            onStateChange?(.clipboardFallback)
             return
         }
 
@@ -934,12 +1005,24 @@ final class HotkeyInputManager {
     }
 
     /// 翻译失败时删掉刚才敲出来的字符。发 N 次退格。
+    /// 写回前的前焦点校验：API 等待期间前台应用变了就放弃合成按键路径。
+    /// 只比对前台 PID（够拦住"切到别的应用"这种最常见的破坏场景）；
+    /// 同应用内切换输入框拦不住，但那是低概率场景，不值得为它引入更脆的 AX 比对。
+    private func isFocusStillValid(_ anchorPID: pid_t?) -> Bool {
+        guard let frontmost = NSWorkspace.shared.frontmostApplication else { return false }
+        let ok = frontmost.processIdentifier == anchorPID
+        if !ok {
+            HotkeyFileLog.shared.log("translate: focus moved (\(anchorPID ?? -1) -> \(frontmost.processIdentifier)) — skip synthetic input, translation on clipboard")
+        }
+        return ok
+    }
+
     private func deleteTypedCharacters(_ count: Int) {
         guard count > 0 else { return }
         guard let source = CGEventSource(stateID: .hidSystemState) else { return }
         for _ in 0..<count {
-            guard let down = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: true),
-                  let up = CGEvent(keyboardEventSource: source, virtualKey: 51, keyDown: false) else { return }
+            guard let down = CGEvent(keyboardEventSource: source, virtualKey: UInt16(kVK_Delete), keyDown: true),
+                  let up = CGEvent(keyboardEventSource: source, virtualKey: UInt16(kVK_Delete), keyDown: false) else { return }
             down.post(tap: .cghidEventTap)
             up.post(tap: .cghidEventTap)
         }
@@ -947,8 +1030,8 @@ final class HotkeyInputManager {
 
     private func sendSelectAllShortcut() {
         guard let source = CGEventSource(stateID: .hidSystemState),
-              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0, keyDown: false) else { return }
+              let keyDown = CGEvent(keyboardEventSource: source, virtualKey: UInt16(kVK_ANSI_A), keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: UInt16(kVK_ANSI_A), keyDown: false) else { return }
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
         keyDown.post(tap: .cghidEventTap)
