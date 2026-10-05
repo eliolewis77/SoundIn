@@ -1,13 +1,6 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0" stop-color="#2C2C2A"/>
-      <stop offset="1" stop-color="#0A0A0A"/>
-    </linearGradient>
-  </defs>
-
-  <!-- macOS squircle 底板 -->
-  <rect x="32" y="32" width="960" height="960" rx="232" fill="url(#bg)"/>
+  <!-- macOS squircle 底板：纯黑铺满画布，不留四周透明边距 -->
+  <rect x="0" y="0" width="1024" height="1024" rx="232" fill="#000000"/>
 
   <!-- 左侧白色声波（渐弱）——等间距排布，间距 48 = 条宽，整体居中 -->
   <g fill="#FFFFFF">

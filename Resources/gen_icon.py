@@ -6,26 +6,14 @@ import os
 S = 1024
 img = Image.new("RGBA", (S, S), (0, 0, 0, 0))
 
-# ── 对角渐变底板（#2C2C2A → #0A0A0A）──
-grad = Image.new("RGBA", (S, S))
-top = (44, 44, 42)      # 2C2C2A
-bot = (10, 10, 10)      # 0A0A0A
-px = grad.load()
-for y in range(S):
-    for x in range(S):
-        t = (x + y) / (2 * S - 2)
-        px[x, y] = (
-            round(top[0] + (bot[0] - top[0]) * t),
-            round(top[1] + (bot[1] - top[1]) * t),
-            round(top[2] + (bot[2] - top[2]) * t),
-            255,
-        )
+# ── 纯黑底板，铺满整个画布（不留四周透明边距）──
+black = Image.new("RGBA", (S, S), (0, 0, 0, 255))
 
-# macOS squircle 近似圆角矩形蒙版
+# macOS squircle 近似圆角矩形蒙版：铺满画布，仅四角内收
 mask = Image.new("L", (S, S), 0)
 mdraw = ImageDraw.Draw(mask)
-mdraw.rounded_rectangle([32, 32, 32 + 960, 32 + 960], radius=232, fill=255)
-img.paste(grad, (0, 0), mask)
+mdraw.rounded_rectangle([0, 0, S, S], radius=232, fill=255)
+img.paste(black, (0, 0), mask)
 
 draw = ImageDraw.Draw(img)
 
