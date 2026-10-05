@@ -1,8 +1,11 @@
 name: Release
 
-# 自动发版：只要把 Info.plist 里的 CFBundleShortVersionString 改成一个新版本号并推到 main，
-# 本工作流就会构建 .app、打 vX.Y.Z 标签、并创建 GitHub Release（自动生成变更说明 + 附上构建产物）。
-# 同一个版本号若已发过版则自动跳过，不会重复发版。
+# ⚠️ 正常发版不要走这里：CI 无开发者证书，产物 ad-hoc 签名（1.0.2 曾启动即崩）。
+# 发版用 scripts/release.sh（本地 Developer ID 签名 + 公证，证书/公证档/Sparkle
+# 私钥都在本机钥匙串）。本工作流仅保留手动触发作兜底；「已发版」判定为
+# 「tag 存在且线上 appcast 已含该版本」，所以本地发过的版本在这里重跑会自动跳过。
+#
+# 未配置签名密钥时回退临时签名（ad-hoc），仍可发版但别人下载后需手动绕开 Gatekeeper。
 #
 # 真实签名 + 公证（可选）：在仓库 Settings → Secrets 配置以下密钥后，CI 会自动导入证书、用
 # Developer ID 签名并对产物做 notarize + staple，别人可直接双击打开：
@@ -12,7 +15,6 @@ name: Release
 #   MACOS_NOTARIZE_KEY_P8     App Store Connect API Key 的 .p8（base64 编码字符串）
 #   MACOS_NOTARIZE_KEY_ID     API Key ID（如 "ABCDE12345"）
 #   MACOS_NOTARIZE_ISSUER     Issuer ID（UUID）
-# 未配置这些密钥时，自动退回临时签名（ad-hoc），仍可发版但别人下载后需手动绕开 Gatekeeper。
 #
 # Sparkle 自动更新：
 #   SPARKLE_PRIVATE_KEY       EdDSA 私钥（Sparkle 的 generate_keys -x 导出，base64 编码字符串）
@@ -20,11 +22,7 @@ name: Release
 #   SPARKLE_PUBLIC_ED_KEY     对应公钥（可选；不设时用 Info.plist 里已写死的 SUPublicEDKey）
 # appcast.xml 发布到 gh-pages 分支，客户端从 https://eliolewis77.github.io/SoundIn/appcast.xml 拉取。
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'Info.plist'
-  workflow_dispatch:   # 手动重跑发版（如修复构建脚本后重新发同一版本）
+  workflow_dispatch:   # 仅手动兜底；常规发版走 scripts/release.sh
 
 permissions:
   contents: write
