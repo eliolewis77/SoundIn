@@ -2,82 +2,68 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleDevelopmentRegion</key>
-    <string>zh-Hans</string>
-    <key>CFBundleExecutable</key>
-    <string>SoundIn</string>
-    <!-- bundle id 曾为 com.eliokit.soundin：2026-10-04 起 macOS 26.6 的
-         ControlCenter 拒绝该 id 的状态项上屏（「blocked host」→ 图标隐藏 +
-         NSStatusItemChangeVisibilityAction 假退出）。根因是 LaunchServices
-         残留了该 id 的 trash 幽灵记录（指向已删除的 ~/.Trash/SoundIn.app），
-         无正规工具可清除（lsregister -kill 已被移除，-u 对不存在路径无效）。
-         换新 id 即得干净记录。迁移时旧域偏好已拷贝到新域，TCC 权限需重新授权。 -->
-    <key>CFBundleIdentifier</key>
-    <string>com.eliokit.soundin.app</string>
-    <key>CFBundleInfoDictionaryVersion</key>
-    <string>6.0</string>
-    <key>CFBundleName</key>
-    <string>SoundIn</string>
-    <key>CFBundleDisplayName</key>
-    <string>SoundIn 声入</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>CFBundleShortVersionString</key>
-    <string>1.0.1</string>
-    <key>CFBundleVersion</key>
-    <string>2</string>
-    <key>CFBundleSupportedPlatforms</key>
-    <array>
-        <string>MacOSX</string>
-    </array>
-	<!-- 以下构建元数据键：Xcode 打包会自动写入。macOS 26.6 的 ControlCenter 对
-         状态项做 appStatusItems 托管裁剪时，缺少结构键的 bundle 会被判为
-         「blocked host」而拒绝上屏（图标隐藏 + NSStatusItemChangeVisibilityAction
-         假退出）。值与 Xcode 26 产物对齐即可，勿删。 -->
-    <key>BuildMachineOSBuild</key>
-    <string>25G83</string>
-    <key>DTCompiler</key>
-    <string>com.apple.compilers.llvm.clang.1_0</string>
-    <key>DTPlatformBuild</key>
-    <string>25F70</string>
-    <key>DTPlatformName</key>
-    <string>macosx</string>
-    <key>DTPlatformVersion</key>
-    <string>26.5</string>
-    <key>DTSDKBuild</key>
-    <string>25F70</string>
-    <key>DTSDKName</key>
-    <string>macosx26.5</string>
-    <key>DTXcode</key>
-    <string>2660</string>
-    <key>DTXcodeBuild</key>
-    <string>17F113</string>
-    <key>NSAppSleepDisabled</key>
-    <true/>
-    <key>NSHighResolutionCapable</key>
-    <true/>
-    <key>CFBundleIconName</key>
-    <string>AppIcon</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>SoundIn（声入）需要访问麦克风来录制并转写您的语音。</string>
-    <key>NSSpeechRecognitionUsageDescription</key>
-    <string>SoundIn（声入）使用语音识别技术将您的语音转换为文字。</string>
-	<!-- Sparkle 自动更新 -->
+	<key>BuildMachineOSBuild</key>
+	<string>25G83</string>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>zh-Hans</string>
+	<key>CFBundleDisplayName</key>
+	<string>SoundIn 声入</string>
+	<key>CFBundleExecutable</key>
+	<string>SoundIn</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIconName</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.eliokit.soundin.app</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>SoundIn</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>1.0.2</string>
+	<key>CFBundleSupportedPlatforms</key>
+	<array>
+		<string>MacOSX</string>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>3</string>
+	<key>DTCompiler</key>
+	<string>com.apple.compilers.llvm.clang.1_0</string>
+	<key>DTPlatformBuild</key>
+	<string>25F70</string>
+	<key>DTPlatformName</key>
+	<string>macosx</string>
+	<key>DTPlatformVersion</key>
+	<string>26.5</string>
+	<key>DTSDKBuild</key>
+	<string>25F70</string>
+	<key>DTSDKName</key>
+	<string>macosx26.5</string>
+	<key>DTXcode</key>
+	<string>2660</string>
+	<key>DTXcodeBuild</key>
+	<string>17F113</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppSleepDisabled</key>
+	<true/>
+	<key>NSHighResolutionCapable</key>
+	<true/>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>SoundIn（声入）需要访问麦克风来录制并转写您的语音。</string>
+	<key>NSSpeechRecognitionUsageDescription</key>
+	<string>SoundIn（声入）使用语音识别技术将您的语音转换为文字。</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
 	<key>SUFeedURL</key>
 	<string>https://eliolewis77.github.io/SoundIn/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>aguBT1OSIJcpNxGe8ufjDh7glQhfP/FYJ7XoUDL5Ljw=</string>
-	<!-- 启动时自动检查更新（延迟 3 秒由 AppUpdater 控制；检查间隔用 Sparkle 2 的
-	     SUScheduledCheckInterval，24 小时。注意不存在 SUUpdateInterval 这个键——
-	     写它没有任何效果，别改回去） -->
-	<key>SUEnableAutomaticChecks</key>
-	<true/>
 	<key>SUScheduledCheckInterval</key>
 	<integer>86400</integer>
 </dict>
