@@ -128,7 +128,9 @@ jobs:
             "https://github.com/sparkle-project/Sparkle/releases/download/${SPARKLE_VERSION}/Sparkle-${SPARKLE_VERSION}.tar.xz"
           mkdir -p /tmp/sparkle-tools
           tar -xJf /tmp/sparkle.tar.xz -C /tmp/sparkle-tools
-          /tmp/sparkle-tools/bin/generate_appcast --version
+          # 自检用 --help：generate_appcast 没有 --version 参数（会因缺
+          # <archives-source-dir> 以 64 退出，白挂一步）
+          /tmp/sparkle-tools/bin/generate_appcast --help > /dev/null
 
       - name: Sign update and generate appcast
         if: steps.check.outputs.exists == 'false'
