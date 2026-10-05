@@ -520,7 +520,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
     }
 
     static let defaultPolishPrompt =
-        "将语音转写结果整理为通顺的书面语：修正错别字和口误，去除语气词，保持原意与原语言，不要添加任何内容。只输出整理后的文字。"
+        "以下是语音转写文本。你是在校对，不是在改写：只修正同音字等明显的转写错误，并补全标点；删除纯粹的填充音（呃、嗯）和连续重复的口吃。除此之外逐字保留原有的语序、用词和口语化表达，包括语气词。不确定是不是错误时，保留原样；不要改写句式，不要书面化，不要增删内容。只输出修正后的文字。"
 
     // ── 连击翻译：复用上面 polish 的接口配置，只换一条翻译指令 ──
     var translateEnabled: Bool = UserDefaults.standard.object(forKey: "vs.translateEnabled") as? Bool ?? false {
@@ -954,7 +954,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         }
         let body: [String: Any] = [
             "model": model,
-            "temperature": 0.3,
+            "temperature": 0,
             "messages": [
                 ["role": "system", "content": systemPrompt],
                 ["role": "user", "content": text]
