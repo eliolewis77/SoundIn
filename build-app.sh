@@ -68,5 +68,8 @@ if [ -z "${SIGN_IDENTITY:-}" ]; then
 else
   echo "签名身份: $SIGN_IDENTITY"
 fi
-/usr/bin/codesign --force --deep --sign "$SIGN_IDENTITY" --timestamp --options runtime "$APP_DIR"
+# --entitlements 必须带 com.apple.security.device.audio-input：Hardened Runtime（--options runtime）
+# 下 macOS 26 的 tccd 检查该 entitlement，缺失则麦克风授权「不弹窗、直接静默拒绝」。
+/usr/bin/codesign --force --deep --sign "$SIGN_IDENTITY" --timestamp --options runtime \
+  --entitlements SoundIn.entitlements "$APP_DIR"
 echo "$APP_DIR"
