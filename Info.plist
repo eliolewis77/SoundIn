@@ -24,15 +24,15 @@
     <string>AppIcon</string>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0.1</string>
+    <key>CFBundleVersion</key>
+    <string>2</string>
     <key>CFBundleSupportedPlatforms</key>
     <array>
         <string>MacOSX</string>
     </array>
-	<key>CFBundleShortVersionString</key>
-	<string>1.0.0</string>
-    <key>CFBundleVersion</key>
-    <string>1</string>
-    <!-- 以下构建元数据键：Xcode 打包会自动写入。macOS 26.6 的 ControlCenter 对
+	<!-- 以下构建元数据键：Xcode 打包会自动写入。macOS 26.6 的 ControlCenter 对
          状态项做 appStatusItems 托管裁剪时，缺少结构键的 bundle 会被判为
          「blocked host」而拒绝上屏（图标隐藏 + NSStatusItemChangeVisibilityAction
          假退出）。值与 Xcode 26 产物对齐即可，勿删。 -->
