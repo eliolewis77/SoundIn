@@ -35,20 +35,21 @@ struct SoundInApp: App {
                 Button("设置…") {
                     // 常规原生窗口：可缩放、三个窗口按钮均可用
                     openWindow(id: "settings")
-                    NSApp.activate(ignoringOtherApps: true)
+                    // 菜单还处于跟踪状态时立即 activate 会被系统吞掉（代理应用尤其如此），
+                    // 设置窗口会开在前台应用后面被挡住。延迟到菜单收起、窗口创建完成
+                    // 之后再激活应用并把设置窗口显式调到前台。
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
+                        NSApp.activate(ignoringOtherApps: true)
+                        if let window = NSApp.windows.first(where: { $0.title.contains("设置") }) {
+                            window.makeKeyAndOrderFront(nil)
+                        }
+                    }
                 }
                 Divider()
-                // 自动更新：手动检查 + 自动检查开关
-                Button("检查更新…") {
-                    NSApp.activate(ignoringOtherApps: true)
-                    AppUpdater.shared.checkForUpdatesManually()
+                Button("退出") {
+                    AppDelegate.userRequestedQuit = true
+                    NSApp.terminate(nil)
                 }
-                Toggle("自动检查更新", isOn: Binding(
-                    get: { AppUpdater.shared.automaticallyChecksForUpdates },
-                    set: { AppUpdater.shared.setAutomaticChecks($0) }
-                ))
-                Divider()
-                Button("退出") { NSApp.terminate(nil) }
             }
             .padding(8)
             // 菜单栏此前从未订阅 voicePhaseChanged，图标与状态文字永远停留在初始值
@@ -149,10 +150,30 @@ struct SoundInApp: App {
 
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
+    /// 菜单「退出」置位后才放行 terminate。Cmd+Q 在启动后 10 秒内会被下面的
+    /// 假退出拦截一并挡掉（极小代价，换启动稳定性）。
+    static var userRequestedQuit = false
+
+    private let launchTime = Date()
+
+    /// macOS 26.6 更新后，MenuBarExtra 状态项在启动瞬间可能收到系统的
+    /// NSStatusItemChangeVisibilityAction，AppKit 据此主动 terminate（exit 0、
+    /// 无崩溃日志），表现为「启动即退」。启动头几秒没有用户交互，这种 terminate
+    /// 一律拒绝：状态项暂时不可见时核心功能（快捷键听写/连击翻译）照常可用，
+    /// 菜单栏恢复后图标自然回来。
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        if Self.userRequestedQuit { return .terminateNow }
+        let elapsed = Date().timeIntervalSince(launchTime)
+        guard elapsed < 10 else { return .terminateNow }
+        HotkeyFileLog.shared.log("app: suppressed spurious terminate at \(String(format: "%.2f", elapsed))s after launch")
+        return .terminateCancel
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
         HotkeyFileLog.shared.log("=== app launched ===")
         HotkeyFileLog.shared.log("axTrusted at launch = \(AXIsProcessTrusted())")
-        NSApp.setActivationPolicy(.accessory)
+        // 不再调用 setActivationPolicy(.accessory)：Info.plist 的 LSUIElement 已让应用
+        // 以代理身份启动。macOS 26.6 上启动期再切一次策略会干扰状态项注册（已知问题）。
         // 把识别/润色各自选中的 API 配置档回写进 SpeechManager（升级迁移后保证活动值一致）
         APIProfileStore.shared.applyActive(to: SpeechManager.shared)
         HotkeyInputManager.shared.start()
@@ -938,6 +959,16 @@ private struct SettingsView: View {
         Section("版本") {
             LabeledContent("SoundIn 声入", value: appVersion)
             LabeledContent("定位", value: "语音输入工具")
+        }
+
+        Section("更新") {
+            Toggle("自动检查更新", isOn: Binding(
+                get: { AppUpdater.shared.automaticallyChecksForUpdates },
+                set: { AppUpdater.shared.setAutomaticChecks($0) }
+            ))
+            Button("检查更新") {
+                AppUpdater.shared.checkForUpdatesManually()
+            }
         }
 
         Section("权限状态") {
