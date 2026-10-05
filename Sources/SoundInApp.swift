@@ -3,6 +3,7 @@ import AVFoundation
 import ApplicationServices
 import ServiceManagement
 import Speech
+import Combine
 
 enum VoiceInputPhase {
     case idle
@@ -246,6 +247,9 @@ private struct SettingsView: View {
     @State private var isTestingPolishConnection = false
     @State private var isConfirmingClearHistory = false
     @State private var sidebarVisible = true
+    // 权限状态的刷新计数：TCC 授权变化系统不会推送通知，授权 API 也不是可观察状态，
+    // 只能靠重查。两个触发源见权限区块上的 onReceive：应用回到前台 + 可见期间轻量轮询。
+    @State private var authRevision = 0
     // 连击翻译触发键录制状态
     @State private var isCapturingTranslateKey = false
     @State private var translateKeyError: String?
@@ -985,15 +989,26 @@ private struct SettingsView: View {
         }
 
         Section("权限状态") {
-            permissionRow(title: "麦克风", granted: micAuthorized, undetermined: micNotDetermined,
+            // 读一次 authRevision 让 body 对刷新计数产生依赖：revision 变化 → 重查权限
+            let auth = authSnapshot
+            permissionRow(title: "麦克风", granted: auth.micAuthorized, undetermined: auth.micNotDetermined,
                          panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
-            permissionRow(title: "语音识别", granted: speechAuthorized, undetermined: speechNotDetermined,
+            permissionRow(title: "语音识别", granted: auth.speechAuthorized, undetermined: auth.speechNotDetermined,
                          panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
-            permissionRow(title: "辅助功能（模拟粘贴）", granted: AXIsProcessTrusted(), undetermined: false,
+            permissionRow(title: "辅助功能（模拟粘贴）", granted: auth.axTrusted, undetermined: false,
                          panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
             Text("未授权项可点「去授权」直达对应设置面板；辅助功能换版本后失效时，在面板中删除旧条目重新添加即可。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
+        }
+        // 授权完从系统设置切回本应用 → 触发重查
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            authRevision += 1
+        }
+        // 应用内系统授权弹窗里点「允许」不会走 activation 事件 → 可见期间每 2 秒兜底轮询
+        //（三次 TCC 查询开销可忽略；区块随页面切走自动停表）
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
+            authRevision += 1
         }
     }
 
@@ -1002,17 +1017,16 @@ private struct SettingsView: View {
         return (version?.isEmpty == false) ? version! : "开发版"
     }
 
-    private var micAuthorized: Bool {
-        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
-    }
-    private var micNotDetermined: Bool {
-        AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
-    }
-    private var speechAuthorized: Bool {
-        SFSpeechRecognizer.authorizationStatus() == .authorized
-    }
-    private var speechNotDetermined: Bool {
-        SFSpeechRecognizer.authorizationStatus() == .notDetermined
+    private var authSnapshot: (micAuthorized: Bool, micNotDetermined: Bool,
+                               speechAuthorized: Bool, speechNotDetermined: Bool, axTrusted: Bool) {
+        _ = authRevision  // 建立依赖：仅为此让 SwiftUI 在刷新计数变化时重算本快照
+        return (
+            micAuthorized: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
+            micNotDetermined: AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined,
+            speechAuthorized: SFSpeechRecognizer.authorizationStatus() == .authorized,
+            speechNotDetermined: SFSpeechRecognizer.authorizationStatus() == .notDetermined,
+            axTrusted: AXIsProcessTrusted()
+        )
     }
 
     @ViewBuilder
