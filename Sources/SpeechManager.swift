@@ -821,7 +821,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         }
 
         guard micStatus == .authorized else {
-            self.errorMessage = NSLocalizedString("speech_microphone_permission_error", comment: "")
+            self.errorMessage = "麦克风权限未授权，请在系统设置 › 隐私与安全性 › 麦克风中允许 SoundIn"
             lastPermissionError = .permissionDenied(message: self.errorMessage ?? "麦克风权限未授权")
             isStarting = false
             return
@@ -836,7 +836,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             }
 
             guard speechStatus == .authorized else {
-                self.errorMessage = NSLocalizedString("speech_permission_error", comment: "")
+                self.errorMessage = "语音识别权限未授权，请在系统设置 › 隐私与安全性 › 语音识别中允许 SoundIn"
                 lastPermissionError = .permissionDenied(message: self.errorMessage ?? "语音识别权限未授权")
                 isStarting = false
                 return
@@ -857,7 +857,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             HotkeyFileLog.shared.log("rec: engine started ok (isRecording=\(isRecording))")
         } catch {
             HotkeyFileLog.shared.log("rec: start FAILED — \(error.localizedDescription)")
-            self.errorMessage = String(format: NSLocalizedString("speech_start_error", comment: ""), error.localizedDescription)
+            self.errorMessage = "无法开始录音：\(error.localizedDescription)"
             isStarting = false
             stopRecording()
         }
@@ -1077,7 +1077,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                     if micAuthorized {
                         self.startRecordingSafe()
                     } else {
-                        self.errorMessage = NSLocalizedString("speech_microphone_permission_error", comment: "")
+                        self.errorMessage = "麦克风权限未授权，请在系统设置 › 隐私与安全性 › 麦克风中允许 SoundIn"
                         self.lastPermissionError = .permissionDenied(message: self.errorMessage ?? "麦克风权限未授权")
                         self.isAwaitingPermission = false
                         self.isStarting = false
@@ -1095,7 +1095,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                     if authStatus == .authorized && micAuthorized {
                         self.startRecordingSafe()
                     } else {
-                        self.errorMessage = NSLocalizedString("speech_permission_error", comment: "")
+                        self.errorMessage = "语音识别权限未授权，请在系统设置 › 隐私与安全性 › 语音识别中允许 SoundIn"
                         self.lastPermissionError = .permissionDenied(message: self.errorMessage ?? "语音识别权限未授权")
                         self.isAwaitingPermission = false
                         self.isStarting = false
@@ -1149,7 +1149,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         let inputNode = audioEngine.inputNode
         let recordingFormat = inputNode.outputFormat(forBus: 0)
         guard recordingFormat.sampleRate > 0 else {
-            errorMessage = NSLocalizedString("audio_input_unavailable", comment: "")
+            errorMessage = "无法访问音频输入设备，请检查麦克风连接"
             return
         }
 
@@ -1219,7 +1219,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         
         let localeId = preferredSpeechLocaleIdentifier()
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: localeId)), recognizer.isAvailable else {
-            errorMessage = NSLocalizedString("speech_unavailable", comment: "")
+            errorMessage = "语音识别服务不可用，请检查识别语言设置或网络"
             return
         }
         
@@ -1248,7 +1248,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         let inputNode = engine.inputNode
         let recordingFormat = inputNode.outputFormat(forBus: 0)
         guard recordingFormat.sampleRate > 0 else {
-            errorMessage = NSLocalizedString("audio_input_unavailable", comment: "")
+            errorMessage = "无法访问音频输入设备，请检查麦克风连接"
             return
         }
         
@@ -1291,7 +1291,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
 
             if let error {
                 if (error as NSError).code != 216 { // 216 = Cancelled
-                    let message = NSLocalizedString("speech_recognition_error", value: "语音识别出错,请重试", comment: "")
+                    let message = "语音识别出错，请重试"
                     self.errorMessage = message
                     self.lastPermissionError = .failure(message: message)
                     // errorMessage isn't shown on the main capsule UI, so also surface a HUD toast
@@ -1344,12 +1344,12 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         let modelName = speechModelName.trimmingCharacters(in: .whitespacesAndNewlines)
 
         guard !baseURLString.isEmpty, !apiKey.isEmpty, !modelName.isEmpty else {
-            errorMessage = NSLocalizedString("speech_api_config_missing", comment: "")
+            errorMessage = "未配置 API 语音识别（API 地址 / 密钥 / 模型名），请在设置中补全"
             return await transcribeAudioFileLocally(audioURL)
         }
 
         guard let endpointURL = speechTranscriptionEndpoint(from: baseURLString) else {
-            errorMessage = NSLocalizedString("speech_api_invalid_url", comment: "")
+            errorMessage = "API 地址无效，请在设置中检查"
             return await transcribeAudioFileLocally(audioURL)
         }
 
@@ -1365,7 +1365,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                 return segmentedText
             }
 
-            errorMessage = NSLocalizedString("speech_api_request_failed", comment: "")
+            errorMessage = "语音识别 API 请求失败，请检查网络或 API 配置"
             return await transcribeAudioFileLocally(audioURL)
         }
 
@@ -1376,7 +1376,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                 apiKey: apiKey,
                 modelName: modelName
             ) else {
-                errorMessage = NSLocalizedString("speech_api_request_failed", comment: "")
+                errorMessage = "语音识别 API 请求失败，请检查网络或 API 配置"
                 return await transcribeAudioFileLocally(audioURL)
             }
 
@@ -1384,7 +1384,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             lastCompletedRecognitionProvider = .api
             return text
         } catch {
-            errorMessage = String(format: NSLocalizedString("speech_api_error", comment: ""), error.localizedDescription)
+            errorMessage = "语音识别 API 出错：\(error.localizedDescription)"
             return await transcribeAudioFileLocally(audioURL)
         }
     }
@@ -1895,7 +1895,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
 
         let localeId = preferredSpeechLocaleIdentifier()
         guard let recognizer = SFSpeechRecognizer(locale: Locale(identifier: localeId)), recognizer.isAvailable else {
-            errorMessage = NSLocalizedString("speech_unavailable", comment: "")
+            errorMessage = "语音识别服务不可用，请检查识别语言设置或网络"
             return ""
         }
 
@@ -1938,7 +1938,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                         #if DEBUG
                         print("❌ Local fallback recognition error: \(error.localizedDescription)")
                         #endif
-                        self?.errorMessage = NSLocalizedString("speech_api_request_failed", comment: "")
+                        self?.errorMessage = "语音识别 API 请求失败，请检查网络或 API 配置"
                         finish(latestText)
                     }
                 }
