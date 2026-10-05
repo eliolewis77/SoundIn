@@ -5,8 +5,8 @@ import Sparkle
 ///
 /// 触发时机两条：
 /// - 启动后延迟 `startupDelay` 静默检查（自动检查开关开启时，Sparkle 自行节流，
-///   最短间隔由 `SUUpdateInterval` 控制，不会每次启动都联网）
-/// - 菜单「检查更新…」手动触发（忽略节流，强制检查）
+///   最短间隔由 Info.plist 的 `SUScheduledCheckInterval` 控制，不会每次启动都联网）
+/// - 设置页「检查更新…」手动触发（忽略节流，强制检查）
 ///
 /// 关键约束：Sparkle 要求更新包用 EdDSA 签名，公钥写在 Info.plist 的 `SUPublicEDKey`。
 /// 公钥不匹配时 Sparkle 会拒绝安装并报错——这是安全边界，不要为了"让更新能用"而绕过。
@@ -28,9 +28,11 @@ final class AppUpdater {
             updaterDelegate: nil,
             userDriverDelegate: nil
         )
+        // startingUpdater: false 只是不立即检查，updater 仍必须 start 才能用——
+        // 缺了这一步，checkForUpdates 会以 "updater hasn't been started yet" 静默失败
+        // （SPUUpdater.m 对未 start 的 updater 直接 return）。
+        try? controller.startUpdater()
     }
-
-    var canCheckForUpdates: Bool { controller.updater.canCheckForUpdates }
 
     /// 启动后延迟静默检查。失败（无网络、appcast 不可达）静默忽略——
     /// 自动检查不该用错误提示打扰用户，手动检查才会报错。

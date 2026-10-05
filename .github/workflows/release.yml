@@ -141,6 +141,9 @@ jobs:
           fi
           echo "$SPARKLE_PRIVATE_KEY_B64" | base64 --decode > /tmp/sparkle_private_key
           chmod 600 /tmp/sparkle_private_key
+          # 私钥不留痕：无论 generate_appcast 成败，退出时都删掉（rm 只在成功路径
+          # 执行的话，签名失败会把 EdDSA 私钥留在 runner 的 /tmp 里）
+          trap 'rm -f /tmp/sparkle_private_key' EXIT
           cd .build-cache/app
           # generate_appcast 对目录里的 zip 做 EdDSA 签名并写出 appcast.xml。
           # enclosure URL 由它按 feed 地址自动推导（固定为 <feed目录>/SoundIn.app.zip），
@@ -148,7 +151,6 @@ jobs:
           /tmp/sparkle-tools/bin/generate_appcast \
             --ed-key-file /tmp/sparkle_private_key \
             .
-          rm -f /tmp/sparkle_private_key
           echo "--- appcast.xml ---"
           cat appcast.xml
 
