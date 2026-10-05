@@ -56,11 +56,14 @@ EOF
 # 为什么必须优先用开发证书：ad-hoc 签名的代码哈希**每次构建都变**，而 macOS 的 TCC
 # 数据库（辅助功能 / 麦克风 / 语音识别授权）是按代码签名身份匹配的——身份一变，
 # 之前授过的权全部作废，且授权项在系统设置里会变成不可勾选。固定证书可让授权长期有效。
+# 末尾必须 || true：脚本开了 pipefail，CI runner 上没有开发证书时 grep 匹配不到
+# 会退出 1，整条命令替换失败，赋值语句直接把脚本带崩（且无任何输出）。
+# 加了之后空结果 → 空字符串 → 走下面的 ad-hoc 兜底，正是本来的意图。
 if [ -z "${SIGN_IDENTITY:-}" ]; then
   SIGN_IDENTITY="$(/usr/bin/security find-identity -v -p codesigning 2>/dev/null \
     | /usr/bin/grep 'Apple Development:' \
     | /usr/bin/head -1 \
-    | /usr/bin/sed -E 's/.*"(.+)".*/\1/')"
+    | /usr/bin/sed -E 's/.*"(.+)".*/\1/' || true)"
 fi
 if [ -z "${SIGN_IDENTITY:-}" ]; then
   SIGN_IDENTITY="-"
