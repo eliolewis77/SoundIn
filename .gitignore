@@ -16,6 +16,10 @@ DerivedData/
 .env
 *.env
 
+# AI 编程助手本地配置与个人待办（非项目源码）
+.claude/
+TODOS.md
+
 # Sparkle EdDSA 私钥（只应存在于 Keychain 与 GitHub Secrets，绝不入库）
 .secrets/
 sparkle_private_key

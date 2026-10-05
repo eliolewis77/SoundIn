@@ -14,7 +14,7 @@ Thanks for your interest in SoundIn. This is a small personal project, but contr
 
 - Requires macOS 15+ and the Swift 6.0 toolchain.
 - Build with `./build-app.sh`, then run `.build-cache/app/SoundIn.app`.
-- By default the build uses ad-hoc signing (`SIGN_IDENTITY=-`). To keep a stable code signature across builds, set your own identity via the `SIGN_IDENTITY` environment variable.
+- Signing identity resolution order: the `SIGN_IDENTITY` environment variable → an auto-detected local **Apple Development** certificate → ad-hoc (`-`) as fallback. A stable certificate keeps macOS TCC permissions (microphone, accessibility) valid across rebuilds; ad-hoc signing invalidates them on every build.
 
 ## Code conventions
 

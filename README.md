@@ -29,7 +29,9 @@ open .build-cache/app/SoundIn.app
 
 `build-app.sh` 以 release 模式编译，并把产物打包签名成 `.app`，放在 `.build-cache/app`。
 
-默认使用**临时签名**（`SIGN_IDENTITY=-`），无需任何个人证书即可本地运行。若希望跨构建保留稳定的代码签名身份（TCC 权限不重复弹窗），用环境变量指定你自己的证书：
+签名身份按以下顺序解析：`SIGN_IDENTITY` 环境变量 → 本机自动探测的 **Apple Development** 开发证书 → ad-hoc 临时签名（无证书时的兜底）。
+
+用固定证书签名可让代码签名身份跨构建保持稳定，macOS 的 TCC 权限（麦克风 / 辅助功能等）不会因重新构建而失效。也可用环境变量显式指定：
 
 ```bash
 SIGN_IDENTITY="Apple Development: you@example.com (TEAMID)" ./build-app.sh
