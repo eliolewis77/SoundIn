@@ -6,5 +6,13 @@
 	     此 entitlement，缺失则直接静默拒绝（不弹窗、不进系统设置列表）。 -->
 	<key>com.apple.security.device.audio-input</key>
 	<true/>
+	<!-- Hardened Runtime 默认开启库校验：要求主程序与动态库 Team ID 一致。
+	     CI 无开发者证书时整个 app（含内嵌 Sparkle.framework）是 ad-hoc 签名，
+	     ad-hoc 没有可匹配的 Team ID，dyld 加载 Sparkle 时直接拒绝
+	     （「mapping process and mapped file have different Team IDs」→ 启动即崩，
+	     1.0.1 更新后打不开就是这个原因）。此键豁免库校验，Sparkle 官方也要求
+	     ad-hoc 签名应用加它；本机用开发证书签名时两边 Team ID 本就一致，不受影响。 -->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
 </dict>
 </plist>
