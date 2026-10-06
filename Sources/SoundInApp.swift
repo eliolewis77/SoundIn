@@ -20,6 +20,9 @@ enum VoiceInputPhase {
 
 extension Notification.Name {
     static let voicePhaseChanged = Notification.Name("voicePhaseChanged")
+    /// 菜单栏点开「设置…」时发出：macOS 上 Window 场景关窗保留状态，
+    /// 重开后上次会话的瞬态 UI（连接测试结果等）需要主动清理
+    static let settingsWindowOpening = Notification.Name("settingsWindowOpening")
 }
 
 @main
@@ -36,6 +39,8 @@ struct SoundInApp: App {
                 Button("设置…") {
                     // 常规原生窗口：可缩放、三个窗口按钮均可用
                     openWindow(id: "settings")
+                    // 重开面板时清掉上次残留的瞬态状态（连接测试结果）
+                    NotificationCenter.default.post(name: .settingsWindowOpening, object: nil)
                     // 菜单还处于跟踪状态时立即 activate 会被系统吞掉（代理应用尤其如此），
                     // 设置窗口会开在前台应用后面被挡住。延迟到菜单收起、窗口创建完成
                     // 之后再激活应用并把设置窗口显式调到前台。
@@ -305,6 +310,12 @@ private struct SettingsView: View {
                 }
                 .help(sidebarVisible ? "收起侧边栏" : "展开侧边栏")
             }
+        }
+        // 关窗再开会恢复场景状态：上次会话的连接测试结果还挂着，
+        // 看起来像当前配置的实时状态。菜单栏点「设置…」时发通知，这里清掉。
+        .onReceive(NotificationCenter.default.publisher(for: .settingsWindowOpening)) { _ in
+            engineConnectionTest = nil
+            polishConnectionTest = nil
         }
         .alert("新建配置档", isPresented: $isAddingProfile) {
             TextField("名称", text: $newProfileName)
@@ -934,11 +945,13 @@ private struct SettingsView: View {
                     .foregroundStyle(.secondary)
             } else {
                 ForEach(history.entries) { entry in
-                    HStack(spacing: 10) {
+                    // 完整换行显示：不限行数、允许纵向撑高，长文本不会被截断；
+                    // 时间/复制按钮对齐首行，避免在大段文本旁垂直居中显得悬空
+                    HStack(alignment: .top, spacing: 10) {
                         Text(entry.text)
-                            .lineLimit(1)
-                            .help(entry.text)
-                        Spacer()
+                            .fixedSize(horizontal: false, vertical: true)
+                            .textSelection(.enabled)
+                        Spacer(minLength: 0)
                         Text(InputHistory.timeText(entry.timestamp))
                             .font(.caption)
                             .foregroundStyle(.secondary)
