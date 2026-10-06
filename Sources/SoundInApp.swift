@@ -766,7 +766,7 @@ private struct SettingsView: View {
                 HStack {
                     Text("触发键")
                     Spacer()
-                    Button(isCapturingTranslateKey ? "请按键…（Esc 取消）" : HotkeyInputManager.Shortcut.keyName(translateKey)) {
+                    Button(isCapturingTranslateKey ? "请按键…（Esc 取消）" : HotkeyInputManager.translateKeyName(translateKey)) {
                         toggleTranslateKeyCapture()
                     }
                 }
@@ -802,7 +802,7 @@ private struct SettingsView: View {
                         .foregroundStyle(.red)
                 }
 
-                Text("在输入框里连按触发键到设定次数即翻译：有选区则替换选区，没有选区则替换全部。")
+                Text("连按触发键到设定次数即翻译：输入框里有选区则替换选区、没有则替换全部；选中的是静态文本（网页等）时，译文显示在选区旁的弹窗里。触发键支持修饰键，如单独按 Shift。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 

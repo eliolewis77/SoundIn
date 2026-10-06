@@ -7,6 +7,7 @@ import os.lock
 
 /// 连击翻译的目标语言。rawValue 直接进 prompt，同时作为设置页 Picker 的 tag。
 enum TranslateTarget: String, CaseIterable, Identifiable {
+    case auto = "自动（中英互译）"
     case english = "英语"
     case simplifiedChinese = "简体中文"
     case traditionalChinese = "繁体中文"
@@ -18,7 +19,8 @@ enum TranslateTarget: String, CaseIterable, Identifiable {
 
     var id: String { rawValue }
 
-    /// 送进 system prompt 的语言名（中文名足够模型理解，避免引入多余映射表）
+    /// 送进 system prompt 的语言名（中文名足够模型理解，避免引入多余映射表）。
+    /// .auto 不走这里——它的指令是"判断语言后选方向"，在 translate() 里单独构造。
     var promptName: String { rawValue }
 }
 
@@ -527,7 +529,7 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         didSet { UserDefaults.standard.set(translateEnabled, forKey: "vs.translateEnabled") }
     }
     var translateTarget: TranslateTarget = TranslateTarget(rawValue:
-        UserDefaults.standard.string(forKey: "vs.translateTarget") ?? "") ?? .english {
+        UserDefaults.standard.string(forKey: "vs.translateTarget") ?? "") ?? .auto {
         didSet { UserDefaults.standard.set(translateTarget.rawValue, forKey: "vs.translateTarget") }
     }
 
@@ -993,7 +995,15 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             return nil
         }
 
-        let systemPrompt = "将用户给出的文本翻译为\(target.promptName)。只输出译文，不要解释、不要添加任何内容。"
+        // 自动方向：中文（含繁体）→ 英语，其他语言（含英语）→ 简体中文。
+        // 让模型判断语言而不是本地正则启发式：省一次检测逻辑维护，
+        // 混合文本（英文段落里夹个中文词）也能按主体语言选对方向。
+        let systemPrompt: String
+        if target == .auto {
+            systemPrompt = "检测用户给出的文本的语言：若主体是中文（含简繁），翻译为英语；否则翻译为简体中文。只输出译文，不要解释、不要添加任何内容。"
+        } else {
+            systemPrompt = "将用户给出的文本翻译为\(target.promptName)。只输出译文，不要解释、不要添加任何内容。"
+        }
         let normalizedBase = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
         guard let url = URL(string: normalizedBase)?.appendingPathComponent("chat/completions") else {
             HotkeyFileLog.shared.log("translate: invalid baseURL")
