@@ -4,6 +4,7 @@ import ApplicationServices
 import ServiceManagement
 import Speech
 import Combine
+import UniformTypeIdentifiers
 
 enum VoiceInputPhase {
     case idle
@@ -1034,8 +1035,18 @@ private struct SettingsView: View {
         }
 
         Section("最近输入") {
+            // 保留条数就放在列表旁边：调小立即裁剪，所见即所留
+            Picker("保留条数", selection: Binding(
+                get: { history.maxEntries },
+                set: { history.maxEntries = $0 }
+            )) {
+                ForEach(InputHistory.limitChoices, id: \.self) { limit in
+                    Text("\(limit) 条").tag(limit)
+                }
+            }
+
             if history.entries.isEmpty {
-                Text("暂无记录，语音输入成功后显示在这里（最多保留 10 条）。")
+                Text("暂无记录，语音输入成功后显示在这里。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
@@ -1055,7 +1066,27 @@ private struct SettingsView: View {
                             .buttonStyle(.link)
                     }
                 }
-                Button("清空历史", role: .destructive) { isConfirmingClearHistory = true }
+                HStack(spacing: 14) {
+                    Button("导出") { exportHistory() }
+                    Button("清空历史", role: .destructive) { isConfirmingClearHistory = true }
+                }
+            }
+        }
+    }
+
+    /// 导出历史为纯文本文件：NSSavePanel 让用户选位置；失败只记日志（导出非关键路径）
+    private func exportHistory() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.nameFieldStringValue = "SoundIn-输入历史.txt"
+        panel.canCreateDirectories = true
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                try InputHistory.shared.exportText().write(to: url, atomically: true, encoding: .utf8)
+                HotkeyFileLog.shared.log("history: exported \(InputHistory.shared.entries.count) entries")
+            } catch {
+                HotkeyFileLog.shared.log("history: export failed — \(error.localizedDescription)")
             }
         }
     }

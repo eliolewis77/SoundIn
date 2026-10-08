@@ -1,7 +1,7 @@
 import AppKit
 import Foundation
 
-/// 最近输入历史：成功输入的转写文本，最多保留 10 条，去重置顶。
+/// 最近输入历史：成功输入的转写文本，保留条数用户可调（默认 10），去重置顶。
 /// 数据仅存本机（UserDefaults JSON）。
 @MainActor
 final class InputHistory: ObservableObject {
@@ -14,7 +14,23 @@ final class InputHistory: ObservableObject {
     }
 
     private static let storageKey = "recentInputHistory"
-    static let maxEntries = 10
+    private static let limitKey = "vs.historyLimit"
+
+    /// 保留条数上限：必须 @Published——设置页 Picker 直接绑定它，若不可观察，
+    /// 调整后没有触发重绘的路径（裁剪 entries 才发 objectWillChange，条数不足时不裁），
+    /// Picker 显示会弹回旧值。调小立即裁剪既有条目（用户在设置里看到的就是实际保留的）。
+    @Published
+    var maxEntries: Int = UserDefaults.standard.object(forKey: limitKey) as? Int ?? 10 {
+        didSet {
+            UserDefaults.standard.set(maxEntries, forKey: Self.limitKey)
+            guard entries.count > maxEntries else { return }
+            entries = Array(entries.prefix(maxEntries))
+            save()
+        }
+    }
+
+    /// 设置页可选的档位
+    static let limitChoices = [10, 20, 50, 100]
 
     @Published private(set) var entries: [Entry] = InputHistory.load()
 
@@ -36,8 +52,8 @@ final class InputHistory: ObservableObject {
         guard !trimmed.isEmpty else { return }
         entries.removeAll { $0.text == trimmed }
         entries.insert(Entry(id: UUID(), text: trimmed, timestamp: Date()), at: 0)
-        if entries.count > Self.maxEntries {
-            entries = Array(entries.prefix(Self.maxEntries))
+        if entries.count > maxEntries {
+            entries = Array(entries.prefix(maxEntries))
         }
         save()
     }
@@ -46,6 +62,22 @@ final class InputHistory: ObservableObject {
     func copyToPasteboard(_ entry: Entry) {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(entry.text, forType: .string)
+    }
+
+    /// 导出为纯文本（新→旧，与界面顺序一致）。落盘路径由保存面板决定，这里只负责拼内容。
+    func exportText() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH:mm"
+        var lines = [
+            "SoundIn 输入历史（导出于 \(formatter.string(from: Date()))，共 \(entries.count) 条）",
+            "",
+        ]
+        for entry in entries {
+            lines.append("—— \(formatter.string(from: entry.timestamp))")
+            lines.append(entry.text)
+            lines.append("")
+        }
+        return lines.joined(separator: "\n")
     }
 
     func clear() {
