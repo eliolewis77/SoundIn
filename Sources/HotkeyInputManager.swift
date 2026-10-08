@@ -241,7 +241,8 @@ final class HotkeyInputManager {
     // MARK: 修饰键触发键
 
     /// 修饰键家族 ID：同一修饰键的左右两个物理键视为同一触发键（用户不区分左手/右手 Shift）。
-    private nonisolated static func modifierFamily(of code: UInt16) -> UInt16? {
+    /// 设置页的冲突检测（翻译触发键 vs 单击/长按快捷键）也要比对左右手等价，故非 private。
+    nonisolated static func modifierFamily(of code: UInt16) -> UInt16? {
         switch code {
         case 54, 55: return 55  // Command
         case 56, 60: return 56  // Shift
@@ -1136,6 +1137,15 @@ final class HotkeyInputManager {
         // 写回模式开始时收掉上一次的弹窗（若有）：新翻译已经接管，旧结果不该继续挂着。
         // 弹窗模式不走这里——它的 show() 本身就是"下次触发替换"。
         TranslatePopup.shared.hide()
+        // 翻译档缺关键字段：不发注定失败的请求，直接提示去哪里配置。
+        // 与常规失败路径一致：先把连击敲进去的字符退掉再报错，否则每次触发都留 N 个空格
+        if SpeechManager.shared.translateConfigMissing {
+            if isFocusStillValid(pid) {
+                deleteTypedCharacters(typedCount)
+            }
+            onStateChange?(.failure(message: "未配置翻译接口（设置 → 翻译）"))
+            return
+        }
         // 焦点元素只查一次：读原文和 loading 指示器定位共用，避免重复 AX 往返
         // （Electron 冷路径一次查询含无障碍树激活，可阻塞主线程 ~1s）
         let focusElement = Self.focusedAXElement(frontmostPID: pid)
@@ -1214,7 +1224,14 @@ final class HotkeyInputManager {
         guard !trimmed.isEmpty else { return }
         let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
         let anchor = Self.selectedTextScreenBounds(frontmostPID: pid)
+        // 必须先 show 再报失败：show 会重置 isDismissed，若直接 showFailure，
+        // 会被上一次弹窗关闭留下的 isDismissed 拦截——表现为再触发毫无反馈
         TranslatePopup.shared.show(original: trimmed, anchor: anchor)
+        // 弹窗模式的反馈就是弹窗本身：配置缺失不发请求，直接在弹窗里说清楚
+        if SpeechManager.shared.translateConfigMissing {
+            TranslatePopup.shared.showFailure("未配置翻译接口（设置 → 翻译）")
+            return
+        }
         let target = SpeechManager.shared.translateTarget
         if let translated = await SpeechManager.shared.translate(trimmed, to: target) {
             HotkeyFileLog.shared.log("translate: popup result len=\(translated.count)")

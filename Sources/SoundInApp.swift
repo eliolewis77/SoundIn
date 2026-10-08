@@ -197,7 +197,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
 private struct SettingsView: View {
     enum Page: String, CaseIterable, Identifiable {
-        case general, hotkeys, engine, polish, test, stats, about
+        case general, hotkeys, engine, polish, translate, stats, about
 
         var id: String { rawValue }
 
@@ -207,7 +207,7 @@ private struct SettingsView: View {
             case .hotkeys: "快捷键"
             case .engine: "识别引擎"
             case .polish: "文字优化"
-            case .test: "录音测试"
+            case .translate: "翻译"
             case .stats: "统计"
             case .about: "关于"
             }
@@ -219,7 +219,7 @@ private struct SettingsView: View {
             case .hotkeys: "keyboard"
             case .engine: "waveform.badge.mic"
             case .polish: "wand.and.stars"
-            case .test: "checkmark.bubble"
+            case .translate: "character.book.closed"
             case .stats: "chart.bar.fill"
             case .about: "info.circle"
             }
@@ -250,6 +250,8 @@ private struct SettingsView: View {
     @State private var isTestingEngineConnection = false
     @State private var polishConnectionTest: SpeechManager.ConnectionTestResult?
     @State private var isTestingPolishConnection = false
+    @State private var translateConnectionTest: SpeechManager.ConnectionTestResult?
+    @State private var isTestingTranslateConnection = false
     @State private var isConfirmingClearHistory = false
     @State private var sidebarVisible = true
     // 权限状态的刷新计数：TCC 授权变化系统不会推送通知，授权 API 也不是可观察状态，
@@ -290,7 +292,7 @@ private struct SettingsView: View {
                 case .hotkeys: hotkeysPage
                 case .engine: enginePage
                 case .polish: polishPage
-                case .test: testPage
+                case .translate: translatePage
                 case .stats: statsPage
                 case .about: aboutPage
                 }
@@ -316,6 +318,7 @@ private struct SettingsView: View {
         .onReceive(NotificationCenter.default.publisher(for: .settingsWindowOpening)) { _ in
             engineConnectionTest = nil
             polishConnectionTest = nil
+            translateConnectionTest = nil
         }
         .alert("新建配置档", isPresented: $isAddingProfile) {
             TextField("名称", text: $newProfileName)
@@ -324,6 +327,8 @@ private struct SettingsView: View {
                 let profile = profileStore.addProfile(named: newProfileName)
                 if addProfileTarget == .engine {
                     selectEngineProfile(profile.id)
+                } else if addProfileTarget == .translate {
+                    selectTranslateProfile(profile.id)
                 } else {
                     selectPolishProfile(profile.id)
                 }
@@ -343,8 +348,9 @@ private struct SettingsView: View {
                 if let pending = profilePendingDelete {
                     let wasEngine = pending.id == profileStore.engineSelectionID
                     let wasPolish = pending.id == profileStore.polishSelectionID
+                    let wasTranslate = pending.id == profileStore.translateSelectionID
                     profileStore.deleteProfile(pending.id)
-                    if wasEngine || wasPolish {
+                    if wasEngine || wasPolish || wasTranslate {
                         profileStore.applyActive(to: speech)
                     }
                 }
@@ -388,6 +394,17 @@ private struct SettingsView: View {
         }
     }
 
+    /// 切换翻译选中的配置档，并同步活动值
+    private func selectTranslateProfile(_ id: UUID?) {
+        profileStore.translateSelectionID = id
+        translateConnectionTest = nil // 配置变化后旧测试结果失效
+        if let p = profileStore.selectedTranslate {
+            speech.translateAPIBaseURL = p.baseURL
+            speech.translateAPIKey = p.apiKey
+            speech.translateModelName = p.modelName
+        }
+    }
+
     /// 字段双写 Binding：读当前选中档的字段；写入同时更新该档与 SpeechManager 活动属性
     private func profileFieldBinding(
         selection: UUID?,
@@ -403,9 +420,10 @@ private struct SettingsView: View {
                     profileStore.updateProfile(selection, keyPath: keyPath, value: newValue)
                 }
                 onActiveChange(newValue)
-                // 配置字段变化后，两页的连接测试结果都可能与当前配置不一致，统一失效
+                // 配置字段变化后，三处（引擎/优化/翻译）的连接测试结果都可能与当前配置不一致，统一失效
                 engineConnectionTest = nil
                 polishConnectionTest = nil
+                translateConnectionTest = nil
             }
         )
     }
@@ -425,6 +443,17 @@ private struct SettingsView: View {
         Picker("接口配置", selection: Binding(
             get: { profileStore.polishSelectionID },
             set: { selectPolishProfile($0) }
+        )) {
+            ForEach(profileStore.profiles) { profile in
+                Text(profile.name).tag(Optional(profile.id))
+            }
+        }
+    }
+
+    private var translateProfilePicker: some View {
+        Picker("接口配置", selection: Binding(
+            get: { profileStore.translateSelectionID },
+            set: { selectTranslateProfile($0) }
         )) {
             ForEach(profileStore.profiles) { profile in
                 Text(profile.name).tag(Optional(profile.id))
@@ -559,6 +588,33 @@ private struct SettingsView: View {
             } else if !shortcut.modifiers.contains([.command, .control, .option, .shift]) {
                 let msg = "当前是单键热键：该按键会被全局接管，在其他应用中按下它将不会正常输入。"
                 if seen.insert(msg).inserted { result.append(msg) }
+            }
+        }
+        return result + translateShortcutConflictWarnings
+    }
+
+    /// 翻译触发键与单击/长按快捷键的冲突（翻译页与快捷键页共用同一份提示）：
+    /// - 单键热键被 Carbon 全局接管（吞键）→ 同键做触发键收不到按键，连击永远计不满
+    /// - 纯修饰键热键与修饰键触发键都走 flagsChanged 观察 → 按一下同时开始录音并计入连击
+    /// 组合键热键（⌘X 等）不吞裸键（见 HotkeyInputManager 的说明），不构成冲突。
+    /// 只警告不阻止：换键是明确动作，强拦反而让用户找不到提示语义。
+    private var translateShortcutConflictWarnings: [String] {
+        var seen = Set<String>()
+        var result: [String] = []
+        func add(_ msg: String) {
+            if seen.insert(msg).inserted { result.append(msg) }
+        }
+        let translateFamily = HotkeyInputManager.modifierFamily(of: translateKey)
+        for shortcut in [clickShortcut, holdShortcut] {
+            if shortcut.isModifierOnly {
+                // 此分支里 family 必非 nil；translateFamily 为 nil（普通键触发）时不等，不误报
+                if let family = HotkeyInputManager.modifierFamily(of: shortcut.keyCode),
+                   family == translateFamily {
+                    add("翻译触发键与单击/长按快捷键是同一个修饰键：按下会同时开始录音并计入连击，请更换其中一个。")
+                }
+            } else if !shortcut.modifiers.contains([.command, .control, .option, .shift]),
+                      shortcut.keyCode == translateKey {
+                add("翻译触发键与单击/长按快捷键是同一个按键：该键已被全局接管，翻译收不到按键，请更换其中一个。")
             }
         }
         return result
@@ -754,15 +810,48 @@ private struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
         }
+    }
 
-        // ── 连击翻译：复用上方同一档接口配置，只换一条翻译指令 ──
-        Section("翻译") {
+    // MARK: - 翻译（连击翻译：独立接口档 + 触发方式）
+    @ViewBuilder
+    private var translatePage: some View {
+        Section {
             Toggle("启用连击翻译", isOn: $speech.translateEnabled)
                 .onChange(of: speech.translateEnabled) { _, _ in
                     if !speech.translateEnabled { stopTranslateKeyCapture() }
                 }
+        }
 
-            if speech.translateEnabled {
+        if speech.translateEnabled {
+            Section("翻译接口（OpenAI 兼容）") {
+                translateProfilePicker
+                profileFieldsSection(
+                    selection: profileStore.translateSelectionID,
+                    baseLabel: "接口地址",
+                    onBaseChange: { speech.translateAPIBaseURL = $0 },
+                    onKeyChange: { speech.translateAPIKey = $0 },
+                    onModelChange: { speech.translateModelName = $0 },
+                    missingWarning: (speech.translateAPIBaseURL.isEmpty || speech.translateModelName.isEmpty)
+                        ? "需要填写接口地址和模型名称才能使用连击翻译。" : nil
+                )
+                profileActionRow(
+                    target: .translate,
+                    selected: profileStore.selectedTranslate,
+                    isTesting: isTestingTranslateConnection,
+                    testResult: translateConnectionTest
+                ) {
+                    isTestingTranslateConnection = true
+                    translateConnectionTest = nil
+                    let base = speech.translateAPIBaseURL
+                    let key = speech.translateAPIKey
+                    let model = speech.translateModelName
+                    let result = await SpeechManager.shared.testAPIConnection(baseURL: base, apiKey: key, model: model)
+                    translateConnectionTest = result
+                    isTestingTranslateConnection = false
+                }
+            }
+
+            Section("触发") {
                 HStack {
                     Text("触发键")
                     Spacer()
@@ -800,6 +889,12 @@ private struct SettingsView: View {
                     Text(translateKeyError)
                         .font(.footnote)
                         .foregroundStyle(.red)
+                }
+
+                ForEach(translateShortcutConflictWarnings, id: \.self) { msg in
+                    Text(msg)
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
                 }
 
                 Text("连按触发键到设定次数即翻译：输入框里有选区则替换选区、没有则替换全部；选中的是静态文本（网页等）时，译文显示在选区旁的弹窗里。触发键支持修饰键，如单独按 Shift。")
@@ -1008,7 +1103,7 @@ private struct SettingsView: View {
                          panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
             permissionRow(title: "语音识别", granted: auth.speechAuthorized, undetermined: auth.speechNotDetermined,
                          panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
-            permissionRow(title: "辅助功能（模拟粘贴）", granted: auth.axTrusted, undetermined: false,
+            permissionRow(title: "辅助功能（按键监听/模拟粘贴）", granted: auth.axTrusted, undetermined: false,
                          panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
             Text("未授权项可点「去授权」直达对应设置面板；辅助功能换版本后失效时，在面板中删除旧条目重新添加即可。")
                 .font(.footnote)

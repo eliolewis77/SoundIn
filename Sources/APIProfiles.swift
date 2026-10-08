@@ -2,7 +2,7 @@ import Foundation
 import SwiftUI
 
 /// 一份 OpenAI 兼容接口配置：名称 + 地址 + Key + 模型。
-/// 识别引擎与文字优化共用同一份列表，各自独立选择用哪一份。
+/// 识别引擎、文字优化与翻译共用同一份列表，各自独立选择用哪一份。
 struct APIProfile: Codable, Identifiable, Equatable {
     var id: UUID
     var name: String
@@ -20,7 +20,7 @@ struct APIProfile: Codable, Identifiable, Equatable {
 }
 
 /// 配置档库。profiles 以 JSON 存 UserDefaults；
-/// engineSelectionID / polishSelectionID 记录两处各自的选中项（可指向同一档）。
+/// engineSelectionID / polishSelectionID / translateSelectionID 记录三处各自的选中项（可指向同一档）。
 @MainActor
 final class APIProfileStore: ObservableObject {
     static let shared = APIProfileStore()
@@ -28,6 +28,7 @@ final class APIProfileStore: ObservableObject {
     private static let profilesKey = "vs.apiProfiles"
     private static let engineSelectionKey = "vs.engineProfileID"
     private static let polishSelectionKey = "vs.polishProfileID"
+    private static let translateSelectionKey = "vs.translateProfileID"
 
     @Published var profiles: [APIProfile] = [] {
         didSet { persistProfiles() }
@@ -38,12 +39,18 @@ final class APIProfileStore: ObservableObject {
     @Published var polishSelectionID: UUID? {
         didSet { persistSelection(polishSelectionID, key: Self.polishSelectionKey) }
     }
+    @Published var translateSelectionID: UUID? {
+        didSet { persistSelection(translateSelectionID, key: Self.translateSelectionKey) }
+    }
 
     var selectedEngine: APIProfile? {
         profiles.first { $0.id == engineSelectionID }
     }
     var selectedPolish: APIProfile? {
         profiles.first { $0.id == polishSelectionID }
+    }
+    var selectedTranslate: APIProfile? {
+        profiles.first { $0.id == translateSelectionID }
     }
 
     private init() {
@@ -52,6 +59,7 @@ final class APIProfileStore: ObservableObject {
             profiles = decoded
             engineSelectionID = loadSelection(key: Self.engineSelectionKey, validIn: profiles)
             polishSelectionID = loadSelection(key: Self.polishSelectionKey, validIn: profiles)
+            translateSelectionID = loadSelection(key: Self.translateSelectionKey, validIn: profiles)
         } else {
             if UserDefaults.standard.data(forKey: Self.profilesKey) != nil {
                 HotkeyFileLog.shared.log("profiles: stored JSON unreadable — falling back to legacy migration")
@@ -72,6 +80,9 @@ final class APIProfileStore: ObservableObject {
         // 兜底：选中项失效（如手动改了存储）时指回第一档
         if engineSelectionID == nil { engineSelectionID = profiles.first?.id }
         if polishSelectionID == nil { polishSelectionID = profiles.first?.id }
+        // 翻译此前复用润色档（v1.0.7 前的行为）：没单独设置过翻译选择时沿用
+        // 润色的选中项，升级后行为不变；要分档再去「翻译」页改
+        if translateSelectionID == nil { translateSelectionID = polishSelectionID }
     }
 
     /// 删除升级迁移来源的 6 个旧键（迁移只应发生一次）
@@ -140,6 +151,7 @@ final class APIProfileStore: ObservableObject {
         profiles.removeAll { $0.id == id }
         if engineSelectionID == id { engineSelectionID = profiles.first?.id }
         if polishSelectionID == id { polishSelectionID = profiles.first?.id }
+        if translateSelectionID == id { translateSelectionID = profiles.first?.id }
     }
 
     func updateProfile(_ id: UUID, keyPath: WritableKeyPath<APIProfile, String>, value: String) {
@@ -147,7 +159,7 @@ final class APIProfileStore: ObservableObject {
         profiles[index][keyPath: keyPath] = value
     }
 
-    /// 启动时把两个选中档的内容回写进 SpeechManager 的活动属性。
+    /// 启动时把各处选中的配置档内容回写进 SpeechManager 的活动属性。
     func applyActive(to speech: SpeechManager) {
         if let p = selectedEngine {
             speech.speechAPIBaseURL = p.baseURL
@@ -158,6 +170,11 @@ final class APIProfileStore: ObservableObject {
             speech.polishAPIBaseURL = p.baseURL
             speech.polishAPIKey = p.apiKey
             speech.polishModelName = p.modelName
+        }
+        if let p = selectedTranslate {
+            speech.translateAPIBaseURL = p.baseURL
+            speech.translateAPIKey = p.apiKey
+            speech.translateModelName = p.modelName
         }
     }
 

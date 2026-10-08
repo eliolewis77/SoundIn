@@ -521,6 +521,23 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         didSet { UserDefaults.standard.set(polishPromptTemplate, forKey: "vs.polishPrompt") }
     }
 
+    // ── 连击翻译：独立的接口配置档（设置 → 翻译），与优化档相互独立 ──
+    var translateAPIBaseURL: String = UserDefaults.standard.string(forKey: "vs.translateBaseURL") ?? "https://api.openai.com/v1" {
+        didSet { UserDefaults.standard.set(translateAPIBaseURL, forKey: "vs.translateBaseURL") }
+    }
+    var translateAPIKey: String = UserDefaults.standard.string(forKey: "vs.translateAPIKey") ?? "" {
+        didSet { UserDefaults.standard.set(translateAPIKey, forKey: "vs.translateAPIKey") }
+    }
+    var translateModelName: String = UserDefaults.standard.string(forKey: "vs.translateModel") ?? "gpt-4o-mini" {
+        didSet { UserDefaults.standard.set(translateModelName, forKey: "vs.translateModel") }
+    }
+    /// 翻译接口档是否缺关键字段（地址 / 模型为空）。Key 可空（兼容本地网关）。
+    /// 触发路径用它把「没配置」和「请求失败」区分开，提示才能指向设置页。
+    var translateConfigMissing: Bool {
+        translateAPIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            || translateModelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
     static let defaultPolishPrompt =
         "以下是语音转写文本。你是在校对，不是在改写：只修正同音字等明显的转写错误，并补全标点；删除纯粹的填充音（呃、嗯）和连续重复的口吃。除此之外逐字保留原有的语序、用词和口语化表达，包括语气词。不确定是不是错误时，保留原样；不要改写句式，不要书面化，不要增删内容。只输出修正后的文字。"
 
@@ -983,13 +1000,13 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         }
     }
 
-    /// 连击翻译：复用润色那一档的地址 / Key / 模型，只把 system prompt 换成翻译指令。
+    /// 连击翻译：使用翻译专属的接口配置档（设置 → 翻译，与优化档相互独立）。
     /// 与 polishTranscription 的关键差异是**失败时返回 nil 而非原文**——
     /// 调用方需要区分"翻译成功"和"翻译失败"才能决定是否回滚输入框。
     func translate(_ text: String, to target: TranslateTarget) async -> String? {
-        let baseURL = polishAPIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let apiKey = polishAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = polishModelName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let baseURL = translateAPIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let apiKey = translateAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let model = translateModelName.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !baseURL.isEmpty, !model.isEmpty else {
             HotkeyFileLog.shared.log("translate: skipped (missing baseURL/model)")
             return nil
