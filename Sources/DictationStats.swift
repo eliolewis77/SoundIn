@@ -1,7 +1,8 @@
 import Foundation
 
 /// 每日听写字数统计：按日累计成功输入的转写字符数（去除空白）。
-/// 数据仅存本机 UserDefaults（键 dictationStats.yyyyMMdd），自动清理 90 天前的旧数据。
+/// 数据仅存本机 UserDefaults（键 dictationStats.yyyyMMdd），自动清理 180 天前的旧数据。
+/// 保留期与统计页 26 周热力图（≈182 天）对齐，避免热力图左半边结构性空白。
 @MainActor
 final class DictationStats: ObservableObject {
     static let shared = DictationStats()
@@ -9,13 +10,13 @@ final class DictationStats: ObservableObject {
     /// UserDefaults 键前缀（静态常量：缓存、清理、日键构造共用一份，避免两处硬编码不一致）
     private static let keyPrefix = "dictationStats."
     private var prefix: String { Self.keyPrefix }
-    private let retentionDays = 90
+    private let retentionDays = 180
     /// 当天已做过一次清理的标记（避免每次记录都全量扫描）
     private var lastCleanupDay = ""
 
     // MARK: - PERF-5：避免重复读 UserDefaults / 重复新建 DateFormatter
     //
-    // 统计页一次渲染的开销原本是：heatmapCells(weeks:13) 触发 91 次 count(for:)，
+    // 统计页一次渲染的开销原本是：heatmapCells(weeks:26) 触发 182 次 count(for:)，
     // 每次 count(for:) 都新建一个 DateFormatter（dateString 内）并读一次 UserDefaults；
     // totalCount 还会额外做一次 UserDefaults.dictionaryRepresentation() 全量快照。
     // 这里改为：复用单个 DateFormatter + 按天失效的内存计数缓存。

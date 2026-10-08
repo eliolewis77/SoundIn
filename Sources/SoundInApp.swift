@@ -1024,7 +1024,7 @@ private struct SettingsView: View {
             HStack(spacing: 10) {
                 statBox(value: stats.todayCount, label: "今日", highlight: true)
                 statBox(value: stats.weekCount, label: "本周")
-                statBox(value: stats.totalCount, label: "累计（保留期内）")
+                statBox(value: stats.totalCount, label: "累计（近半年）")
             }
             .padding(.vertical, 4)
         }
