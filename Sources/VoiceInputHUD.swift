@@ -34,10 +34,25 @@ final class VoiceInputHUDManager {
     /// 避免快速连按时把新显示的胶囊 orderOut 藏掉。
     private var showGeneration = 0
 
+    /// 底部胶囊总开关（设置 → 通用）。关闭后 apply 不再显示/更新任何状态，
+    /// 只负责把已显示的胶囊立即收起；重新打开后下一次状态变化自然恢复显示。
+    var isEnabled: Bool = UserDefaults.standard.object(forKey: "vs.hudEnabled") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(isEnabled, forKey: "vs.hudEnabled")
+            if !isEnabled { hide(after: 0) }
+        }
+    }
+
     private init() {}
 
     // MARK: - 状态机入口：把 VoiceInputPhase 映射为 HUD 展示
     func apply(voicePhase: VoiceInputPhase) {
+        // 总开关关闭：静默吞掉状态变化。失败提示也一并不显示——开关是绝对的用户意愿，
+        // 状态仍可从菜单栏图标（波形/对勾/感叹号）看出来。
+        guard isEnabled else {
+            hide(after: 0)
+            return
+        }
         switch voicePhase {
         case .recording:
             show()

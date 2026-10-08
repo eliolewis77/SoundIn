@@ -491,6 +491,12 @@ private struct SettingsView: View {
                 }
             ))
             .help("开启后，粘贴的转写文本会去掉最后一个句号、问号、感叹号等终止标点。默认关闭。")
+
+            Toggle("显示语音输入悬浮窗", isOn: Binding(
+                get: { VoiceInputHUDManager.shared.isEnabled },
+                set: { VoiceInputHUDManager.shared.isEnabled = $0 }
+            ))
+            .help("录音/识别时在屏幕底部居中显示状态胶囊。关闭后仅菜单栏图标反映状态。默认开启。")
         }
     }
 
@@ -682,6 +688,34 @@ private struct SettingsView: View {
                 }
             }
         }
+
+        // 录音测试并进引擎页（原先单独成页太薄）：走与快捷键完全相同的识别链路，
+        // 配完引擎往下滚就是"实际录一句"的验证，配置 → 测试连接 → 实测一条动线。
+        Section("录音测试") {
+            HStack {
+                Button(isTestRecording ? "停止并识别" : "开始录音测试") {
+                    toggleTestRecording()
+                }
+                .disabled(SpeechManager.shared.isRecording && !isTestRecording)
+
+                Spacer()
+            }
+            if isTestRecording {
+                Label("正在录音…", systemImage: "mic.fill")
+                    .foregroundStyle(.red)
+                    .font(.footnote)
+            } else if isTranscribing {
+                Text("识别中…")
+                    .foregroundStyle(.secondary)
+                    .font(.footnote)
+            }
+            if !testResult.isEmpty {
+                Text(testResult)
+                    .font(.callout)
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
     }
 
     /// 「测试连接」按钮（结果由 connectionTestResult 单独渲染在按钮行下方）
@@ -693,6 +727,8 @@ private struct SettingsView: View {
             Task { await action() }
         }
         .disabled(isRunning)
+        // 强调色填充：配置档行里使用频率最高的主操作，与相邻的普通按钮区分开
+        .buttonStyle(.borderedProminent)
     }
 
     // MARK: - 配置档公共组件（识别引擎页 / 文字优化页共用）
@@ -944,35 +980,7 @@ private struct SettingsView: View {
         HotkeyInputManager.shared.endTriggerKeyCapture()
     }
 
-    // MARK: - 录音测试
-    @ViewBuilder
-    private var testPage: some View {
-        Section("录音测试") {
-            HStack {
-                Button(isTestRecording ? "停止并识别" : "开始录音测试") {
-                    toggleTestRecording()
-                }
-                .disabled(SpeechManager.shared.isRecording && !isTestRecording)
-
-                Spacer()
-            }
-            if isTestRecording {
-                Label("正在录音…", systemImage: "mic.fill")
-                    .foregroundStyle(.red)
-                    .font(.footnote)
-            } else if isTranscribing {
-                Text("识别中…")
-                    .foregroundStyle(.secondary)
-                    .font(.footnote)
-            }
-            if !testResult.isEmpty {
-                Text(testResult)
-                    .font(.callout)
-                    .textSelection(.enabled)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-            }
-        }
-    }
+    // MARK: - 录音测试（引擎页底部区块）
 
     /// 设置页内的语音转文字测试：走与快捷键完全相同的识别链路（仅显示原始转写，不含文字优化）
     private func toggleTestRecording() {
