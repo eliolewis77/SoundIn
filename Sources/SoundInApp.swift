@@ -668,8 +668,8 @@ private struct SettingsView: View {
                     onBaseChange: { speech.speechAPIBaseURL = $0 },
                     onKeyChange: { speech.speechAPIKey = $0 },
                     onModelChange: { speech.speechModelName = $0 },
-                    missingWarning: (speech.speechAPIBaseURL.isEmpty || speech.speechAPIKey.isEmpty || speech.speechModelName.isEmpty)
-                        ? "API 模式需要填写 Base URL、API Key 和模型名称。" : nil
+                    missingWarning: (speech.speechAPIBaseURL.isEmpty || speech.speechModelName.isEmpty)
+                        ? "API 模式需要填写 Base URL 和模型名称；API Key 可留空（本地网关通常不需要）。" : nil
                 )
                 profileActionRow(
                     target: .engine,
@@ -838,6 +838,16 @@ private struct SettingsView: View {
                             .padding(8)
                             .allowsHitTesting(false)
                     }
+                }
+                // 恢复默认 = 清空自定义指令（空值即跟随系统默认，保持随版本改进）
+                HStack {
+                    Spacer()
+                    Button("恢复默认指令") {
+                        speech.polishPromptTemplate = ""
+                    }
+                    .font(.footnote)
+                    .buttonStyle(.link)
+                    .disabled(speech.polishPromptTemplate.isEmpty)
                 }
             }
 

@@ -1370,8 +1370,10 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         let apiKey = speechAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let modelName = speechModelName.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        guard !baseURLString.isEmpty, !apiKey.isEmpty, !modelName.isEmpty else {
-            errorMessage = "未配置 API 语音识别（API 地址 / 密钥 / 模型名），请在设置中补全"
+        // API Key 可留空：本地网关（whisper.cpp / LocalAI 等）通常不设 Key，
+        // 请求侧对空 Key 不带 Authorization 头即可
+        guard !baseURLString.isEmpty, !modelName.isEmpty else {
+            errorMessage = "未配置 API 语音识别（API 地址 / 模型名），请在设置中补全"
             return await transcribeAudioFileLocally(audioURL)
         }
 
@@ -1526,7 +1528,8 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         guard let endpointURL = resolvedEndpointURL else { return nil }
         let apiKey = apiKey ?? speechAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
         let modelName = modelName ?? speechModelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !apiKey.isEmpty, !modelName.isEmpty else { return nil }
+        // 与整段路径一致：Key 可空（本地网关），只硬性要求模型名
+        guard !modelName.isEmpty else { return nil }
 
         await segmentTranscriptionLimiter.acquire()
 
@@ -1601,7 +1604,10 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
             let boundary = "Boundary-\(UUID().uuidString)"
             var request = URLRequest(url: endpointURL)
             request.httpMethod = "POST"
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            // 空 Key 不带 Authorization：部分本地网关会拒绝畸形的 "Bearer " 头
+            if !apiKey.isEmpty {
+                request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            }
             request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
             request.httpBody = try Self.multipartTranscriptionBody(
                 boundary: boundary,
