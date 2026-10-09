@@ -1185,6 +1185,8 @@ final class HotkeyInputManager {
             onStateChange?(.failure(message: "翻译失败"))
             return
         }
+        // 翻译成功即入历史，与后续写回方式无关（粘贴 / 剪贴板兜底都算交付）
+        TranslationHistory.shared.record(source: trimmed, translated: translated, targetName: target.rawValue)
 
         // 写回前的最后防线：翻译要等几秒，期间用户可能已经切到别的应用/输入框。
         // 此时退格 / ⌘A / ⌘V 会打在无关内容上（Finder 全选文件、终端粘贴译文），
@@ -1236,6 +1238,7 @@ final class HotkeyInputManager {
         if let translated = await SpeechManager.shared.translate(trimmed, to: target) {
             HotkeyFileLog.shared.log("translate: popup result len=\(translated.count)")
             TranslatePopup.shared.showResult(translated)
+            TranslationHistory.shared.record(source: trimmed, translated: translated, targetName: target.rawValue)
         } else {
             HotkeyFileLog.shared.log("translate: popup failed")
             TranslatePopup.shared.showFailure("翻译失败")

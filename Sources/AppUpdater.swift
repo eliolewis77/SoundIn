@@ -6,7 +6,7 @@ import Sparkle
 /// 触发时机两条：
 /// - 启动后延迟 `startupDelay` 静默检查（自动检查开关开启时，Sparkle 自行节流，
 ///   最短间隔由 Info.plist 的 `SUScheduledCheckInterval` 控制，不会每次启动都联网）
-/// - 设置页「检查更新…」手动触发（忽略节流，强制检查）
+/// - 设置页「检查更新」手动触发（忽略节流，强制检查）
 ///
 /// 关键约束：Sparkle 要求更新包用 EdDSA 签名，公钥写在 Info.plist 的 `SUPublicEDKey`。
 /// 公钥不匹配时 Sparkle 会拒绝安装并报错——这是安全边界，不要为了"让更新能用"而绕过。

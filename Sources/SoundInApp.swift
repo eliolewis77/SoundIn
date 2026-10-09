@@ -37,7 +37,7 @@ struct SoundInApp: App {
         MenuBarExtra {
             VStack {
                 Text(statusText).foregroundStyle(.secondary)
-                Button("设置…") {
+                Button("设置") {
                     // 常规原生窗口：可缩放、三个窗口按钮均可用
                     openWindow(id: "settings")
                     // 重开面板时清掉上次残留的瞬态状态（连接测试结果）
@@ -229,6 +229,7 @@ private struct SettingsView: View {
 
     @Bindable var speech = SpeechManager.shared
     @ObservedObject var history = InputHistory.shared
+    @ObservedObject var translationHistory = TranslationHistory.shared
     @ObservedObject var profileStore = APIProfileStore.shared
     @ObservedObject var stats = DictationStats.shared
     @State private var selectedPage: Page = .general
@@ -254,6 +255,7 @@ private struct SettingsView: View {
     @State private var translateConnectionTest: SpeechManager.ConnectionTestResult?
     @State private var isTestingTranslateConnection = false
     @State private var isConfirmingClearHistory = false
+    @State private var isConfirmingClearTranslationHistory = false
     @State private var sidebarVisible = true
     // 权限状态的刷新计数：TCC 授权变化系统不会推送通知，授权 API 也不是可观察状态，
     // 只能靠重查。两个触发源见权限区块上的 onReceive：应用回到前台 + 可见期间轻量轮询。
@@ -368,6 +370,16 @@ private struct SettingsView: View {
             Button("取消", role: .cancel) {}
         } message: {
             Text("最近输入记录将全部删除，听写统计数字不受影响。")
+        }
+        .confirmationDialog(
+            "清空全部翻译历史？",
+            isPresented: $isConfirmingClearTranslationHistory,
+            titleVisibility: .visible
+        ) {
+            Button("清空", role: .destructive) { translationHistory.clear() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("翻译记录（原文与译文）将全部删除。")
         }
     }
 
@@ -1048,7 +1060,7 @@ private struct SettingsView: View {
             .padding(.vertical, 4)
         }
 
-        Section("最近半年") {
+        Section("听写热力图（近半年）") {
             DictationHeatmapView(cells: stats.heatmapCells(weeks: 26))
         }
 
@@ -1089,6 +1101,48 @@ private struct SettingsView: View {
                     Button("清空历史", role: .destructive) { isConfirmingClearHistory = true }
                 }
             }
+        }
+
+        // 标题不用「最近翻译」：该字面量会被编译链路吞掉（二进制查无此串、区块头
+        // 渲染为空），换其他措辞正常——同文件其他 Section 标题均无此问题
+        Section {
+            if translationHistory.entries.isEmpty {
+                Text("暂无翻译记录，连击翻译成功后显示在这里（最多保留 50 条）。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } else {
+                ForEach(translationHistory.entries) { entry in
+                    // 双语同显不做切换：原文小字限 2 行（悬停看全文），译文为主体；
+                    // 复制固定复制译文——原文只是参照
+                    HStack(alignment: .top, spacing: 10) {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(entry.source)
+                                .font(.footnote)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(2)
+                                .help(entry.source)
+                            Text(entry.translated)
+                                .textSelection(.enabled)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        Spacer(minLength: 0)
+                        VStack(alignment: .trailing, spacing: 4) {
+                            Text(entry.targetName)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                            Text(InputHistory.timeText(entry.timestamp))
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Button("复制") { translationHistory.copyToPasteboard(entry) }
+                                .font(.caption)
+                                .buttonStyle(.link)
+                        }
+                    }
+                }
+                Button("清空翻译历史", role: .destructive) { isConfirmingClearTranslationHistory = true }
+            }
+        } header: {
+            Text("翻译记录")
         }
     }
 
