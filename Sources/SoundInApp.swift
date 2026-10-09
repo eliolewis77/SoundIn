@@ -532,7 +532,7 @@ private struct SettingsView: View {
         }
 
         Section {
-            Text("单击键：点一下开始，再点一下结束。长按键：按住说话，松开即停。两个快捷键同时生效。")
+            Text("单击快捷键：点一下开始，再点一下结束。长按快捷键：按住说话，松开即停。两个快捷键同时生效。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
             if let registrationError {
@@ -660,11 +660,11 @@ private struct SettingsView: View {
         }
 
         if speech.recognitionProvider == .api {
-            Section("OpenAI 兼容 API（语音转写）") {
+            Section("识别接口（OpenAI 兼容）") {
                 engineProfilePicker
                 profileFieldsSection(
                     selection: profileStore.engineSelectionID,
-                    baseLabel: "Base URL",
+                    baseLabel: "接口地址",
                     onBaseChange: { speech.speechAPIBaseURL = $0 },
                     onKeyChange: { speech.speechAPIKey = $0 },
                     onModelChange: { speech.speechModelName = $0 },
@@ -798,7 +798,7 @@ private struct SettingsView: View {
         }
 
         if speech.polishEnabled {
-            Section("优化模型（OpenAI 兼容）") {
+            Section("优化接口（OpenAI 兼容）") {
                 polishProfilePicker
                 profileFieldsSection(
                     selection: profileStore.polishSelectionID,
@@ -1132,7 +1132,7 @@ private struct SettingsView: View {
     private var aboutPage: some View {
         Section("版本") {
             LabeledContent("SoundIn 声入", value: appVersion)
-            LabeledContent("定位", value: "语音输入工具")
+            LabeledContent("简介", value: "语音输入工具")
         }
 
         Section("更新") {
