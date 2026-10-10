@@ -1,0 +1,15 @@
+<?xml version="1.0" standalone="yes"?>
+<rss xmlns:sparkle="http://www.andymatuschak.org/xml-namespaces/sparkle" version="2.0">
+    <channel>
+        <title>SoundIn</title>
+        <item>
+            <title>1.0.11</title>
+            <pubDate>Sat, 10 Oct 2026 18:43:50 +0800</pubDate>
+            <sparkle:version>12</sparkle:version>
+            <sparkle:shortVersionString>1.0.11</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>15.0</sparkle:minimumSystemVersion>
+            <sparkle:hardwareRequirements>arm64</sparkle:hardwareRequirements>
+            <enclosure url="https://eliolewis77.github.io/SoundIn/SoundIn.app.zip" length="1711622" type="application/octet-stream" sparkle:edSignature="CNpy0DeEn2rwkaZ3OK81tbQ3mTuzVTz7ORlMUzcQPh1vDJuR5Il3UfozrIwvAIvOk5hbfGqYKPJXC1LULlB2DA=="/>
+        </item>
+    </channel>
+</rss>
