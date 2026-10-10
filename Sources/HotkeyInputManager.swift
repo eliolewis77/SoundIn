@@ -186,7 +186,12 @@ final class HotkeyInputManager {
 
     static let defaultHoldThreshold: TimeInterval = 0.7
 
-    var holdThreshold: TimeInterval = (UserDefaults.standard.object(forKey: "voiceInputHoldThreshold") as? Double) ?? defaultHoldThreshold {
+    var holdThreshold: TimeInterval = {
+        let raw = UserDefaults.standard.object(forKey: "voiceInputHoldThreshold") as? Double
+            ?? HotkeyInputManager.defaultHoldThreshold
+        return min(HotkeyInputManager.holdThresholdOptions.last!,
+                   max(HotkeyInputManager.holdThresholdOptions.first!, raw))
+    }() {
         didSet {
             UserDefaults.standard.set(holdThreshold, forKey: "voiceInputHoldThreshold")
         }
@@ -201,21 +206,32 @@ final class HotkeyInputManager {
 
     // MARK: - 连击翻译触发设置
 
-    /// 连击翻译的触发键（纯按键，不带修饰键）。默认 Space。
+    /// 连击翻译的触发键（纯按键，不带修饰键）。默认 Shift。
+    /// 选修饰键而非空格：空格在中文 IME 下用于上屏候选词，拼音连打会被误计成连击，
+    /// 且空格回滚按"每击一个可退格字符"假设会误删上屏的汉字；修饰键不敲进字符
+    /// （回滚 0 次）、不参与上屏，从默认值层面规避冲突（见 TODOS.md P1）。
     var translateKey: UInt16 = {
         let raw = UserDefaults.standard.object(forKey: "voiceInputTranslateKey") as? Int
         guard let raw, HotkeyInputManager.isAllowedTranslateKey(UInt16(truncatingIfNeeded: raw)) else {
-            return UInt16(kVK_Space)
+            return UInt16(kVK_Shift)
         }
         return UInt16(truncatingIfNeeded: raw)
     }() {
         didSet { UserDefaults.standard.set(Int(translateKey), forKey: "voiceInputTranslateKey") }
     }
 
+    /// 连击次数候选值：设置页 Picker 选项与 translateTapCount 持久化 clamp 共用此来源。
+    static let translateTapCountOptions = [2, 3, 4, 5]
+    /// 连击间隔候选值（秒）：同上，设置页 Picker 选项与 translateInterval 持久化 clamp 共用。
+    static let translateIntervalOptions: [TimeInterval] = [0.4, 0.6, 0.9]
+    /// 长按阈值候选值（秒）：设置页 Picker 选项与 holdThreshold 持久化 clamp 共用。
+    static let holdThresholdOptions: [TimeInterval] = [0.5, 0.7, 1.0]
+
     /// 连击到该次数即触发翻译。默认 3。
     var translateTapCount: Int = {
         let raw = UserDefaults.standard.object(forKey: "voiceInputTranslateTapCount") as? Int ?? 3
-        return min(5, max(2, raw))
+        return min(HotkeyInputManager.translateTapCountOptions.last!,
+                   max(HotkeyInputManager.translateTapCountOptions.first!, raw))
     }() {
         didSet { UserDefaults.standard.set(translateTapCount, forKey: "voiceInputTranslateTapCount") }
     }
@@ -223,7 +239,8 @@ final class HotkeyInputManager {
     /// 相邻两次按键的最大间隔，超时则重新计数。默认 0.6 秒。
     var translateInterval: TimeInterval = {
         let raw = UserDefaults.standard.object(forKey: "voiceInputTranslateInterval") as? Double ?? 0.6
-        return min(2.0, max(0.3, raw))
+        return min(HotkeyInputManager.translateIntervalOptions.last!,
+                   max(HotkeyInputManager.translateIntervalOptions.first!, raw))
     }() {
         didSet { UserDefaults.standard.set(translateInterval, forKey: "voiceInputTranslateInterval") }
     }
@@ -617,26 +634,24 @@ final class HotkeyInputManager {
         return false
     }
 
-    /// 读取焦点元素的选中文本（无选中文本 / 无辅助功能权限时返回 nil）。非主线程安全。
-    nonisolated static func focusedSelectedText(frontmostPID: pid_t? = nil) -> String? {
+    /// 读焦点元素上指定 AX 属性的非空字符串文本（无权限 / 无焦点元素 / 属性缺失时 nil）。非主线程安全。
+    private nonisolated static func readFocusedAXAttribute(_ attribute: String, frontmostPID: pid_t? = nil) -> String? {
         guard AXIsProcessTrusted() else { return nil }
         guard let axElement = focusedAXElement(frontmostPID: frontmostPID) else { return nil }
         var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(axElement, kAXSelectedTextAttribute as CFString, &value) == .success,
+        guard AXUIElementCopyAttributeValue(axElement, attribute as CFString, &value) == .success,
               let text = value as? String, !text.isEmpty else { return nil }
         return text
     }
 
-    /// 读取焦点元素（文本框 / 文本区）的全部内容。终端、游戏、PDF 阅读器等
-    /// 不暴露 kAXValue，返回 nil——此时翻译功能直接放弃，不发请求。
-    nonisolated static func focusedElementText(frontmostPID: pid_t? = nil) -> String? {
-        guard AXIsProcessTrusted() else { return nil }
-        guard let axElement = focusedAXElement(frontmostPID: frontmostPID) else { return nil }
-        return elementText(axElement)
+    /// 读取焦点元素的选中文本（无选中文本 / 无辅助功能权限时返回 nil）。非主线程安全。
+    nonisolated static func focusedSelectedText(frontmostPID: pid_t? = nil) -> String? {
+        readFocusedAXAttribute(kAXSelectedTextAttribute, frontmostPID: frontmostPID)
     }
 
     /// 读取元素 kAXValue 的非空文本。已持有焦点元素的调用方直接用这个，
-    /// 省一次焦点查询的 AX 往返。
+    /// 省一次焦点查询的 AX 往返。终端、游戏、PDF 阅读器等不暴露 kAXValue，
+    /// 返回 nil——此时翻译功能直接放弃，不发请求。
     nonisolated static func elementText(_ element: AXUIElement) -> String? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
@@ -647,6 +662,31 @@ final class HotkeyInputManager {
     /// 视为「输入框」的 AX 角色：命中则翻译结果写回光标处，
     /// 不命中但有选区时走弹窗模式（静态文本写回无处可去）。
     private nonisolated static let editableAXRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
+
+    /// 整框翻译（无选区）的长度上限（字符）：焦点元素全文直接发往翻译 API 的边界。
+    /// 超限基本都是终端缓冲 / 聊天记录这类大容器，不该整包上传——提示改走划词。
+    private static let maxWholeFieldTranslateChars = 5000
+
+    /// 读元素 AX 角色，读不到返回空串。
+    private nonisolated static func axRole(of element: AXUIElement) -> String {
+        var roleRef: CFTypeRef?
+        return AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef) == .success
+            ? (roleRef as? String ?? "") : ""
+    }
+
+    /// 元素是否为可编辑输入角色。快照判定与整框翻译闸共用，避免两处判定漂移。
+    private nonisolated static func isEditableElement(_ element: AXUIElement) -> Bool {
+        editableAXRoles.contains(axRole(of: element))
+    }
+
+    /// 读元素字符数（kAXNumberOfCharacters，廉价整数 AX 属性）。属性不可用返回 nil，
+    /// 调用方回退到整段读取后按长度判断。
+    private nonisolated static func axElementCharacterCount(_ element: AXUIElement) -> Int? {
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(element, kAXNumberOfCharactersAttribute as CFString, &value) == .success,
+              let number = value as? NSNumber else { return nil }
+        return number.intValue
+    }
 
     /// 触发键第 1 次按下时的快照：选中文本 + 焦点元素是否可编辑。
     /// 一次焦点解析读两样（kAXSelectedText + kAXRole），不给连击热路径加额外 AX 往返。
@@ -662,10 +702,7 @@ final class HotkeyInputManager {
         } else {
             selectedText = nil
         }
-        var roleRef: CFTypeRef?
-        let role = AXUIElementCopyAttributeValue(axElement, kAXRoleAttribute as CFString, &roleRef) == .success
-            ? (roleRef as? String ?? "") : ""
-        return (selectedText, Self.editableAXRoles.contains(role))
+        return (selectedText, Self.isEditableElement(axElement))
     }
 
     /// 当前选中范围的屏幕框（Cocoa 坐标，左下原点），弹窗定位用。
@@ -993,6 +1030,9 @@ final class HotkeyInputManager {
     /// 第 1 次按下时焦点元素是否可编辑（AXRole ∈ 输入框类）。
     /// 可编辑 → 走写回模式；不可编辑且有选区 → 弹窗模式。
     private var translateAnchorEditable = false
+    /// 本轮连击是否已取过锚点快照。连击中途在设置里调小连击次数时 streak 会直接
+    /// 越过 snapshotTap 触发，此标记保证触发前补拍，锚点总存在。
+    private var translateAnchorCaptured = false
     private var isTranslating = false
 
     private func resetTranslateTaps() {
@@ -1000,6 +1040,16 @@ final class HotkeyInputManager {
         translateLastTapTime = 0
         translateAnchorText = nil
         translateAnchorEditable = false
+        translateAnchorCaptured = false
+    }
+
+    /// 取触发键锚点快照（选中文本 + 可编辑性）。常规第 N-1 击与触发前补拍共用。
+    private func captureTranslateAnchor() {
+        let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
+        let snapshot = Self.focusedSelectionSnapshot(frontmostPID: pid)
+        translateAnchorText = snapshot.selectedText
+        translateAnchorEditable = snapshot.isEditable
+        translateAnchorCaptured = true
     }
 
     /// 处理一次 keyDown：命中触发键则累加计数，任何其他键都会清零。
@@ -1068,7 +1118,7 @@ final class HotkeyInputManager {
         return true
     }
 
-    /// 计数 +1；第 1 击做选区快照，攒够目标次数触发翻译。
+    /// 计数 +1；按触发键类型选择快照时机（见 snapshotTap 注释），攒够目标次数触发翻译。
     private func advanceTranslateStreak() {
         let now = ProcessInfo.processInfo.systemUptime
         // 超时则从 1 重新数起（不是继续累加，避免"1 + 超时 + 1"被算成两次）
@@ -1076,22 +1126,31 @@ final class HotkeyInputManager {
             translateTapStreak = 0
             translateAnchorText = nil
             translateAnchorEditable = false
+            translateAnchorCaptured = false
         }
         translateLastTapTime = now
         translateTapStreak += 1
 
-        if translateTapStreak == 1 {
-            let pid = NSWorkspace.shared.frontmostApplication?.processIdentifier
-            // 一次 AX 解析同时读选中文本 + 角色可编辑性，供触发时分流写回 / 弹窗
-            let snapshot = Self.focusedSelectionSnapshot(frontmostPID: pid)
-            translateAnchorText = snapshot.selectedText
-            translateAnchorEditable = snapshot.isEditable
-            HotkeyFileLog.shared.log("translate: tap 1/\(translateTapCount) anchorChars=\(translateAnchorText?.count ?? 0) editable=\(translateAnchorEditable)")
+        // 选区快照的时机。字符键触发键（空格等）每击都往输入框插字符，必须在第 1 击
+        // 记下"翻译前的干净状态"；修饰键（默认 Shift）不敲进任何字符，快照推迟到
+        // 第 N-1 击——快照是主线程同步 AX 查询，最前台应用卡顿会拖住主线程（0.3s 超时），
+        // 而绝大多数触发键敲击（句首大写、单按 Shift 等）根本成不了连击，推迟后
+        // 这些敲击不再白付这笔 IPC 成本。
+        // （修饰键 + 连击次数 2 时 N-1 = 1，与字符键路径重合，无需特判）
+        let snapshotTap = Self.typesCharacters(translateKey) ? 1 : translateTapCount - 1
+        if translateTapStreak == snapshotTap {
+            captureTranslateAnchor()
+            HotkeyFileLog.shared.log("translate: tap \(translateTapStreak)/\(translateTapCount) snapshot anchorChars=\(translateAnchorText?.count ?? 0) editable=\(translateAnchorEditable)")
         } else {
             HotkeyFileLog.shared.log("translate: tap \(translateTapStreak)/\(translateTapCount)")
         }
 
         guard translateTapStreak >= translateTapCount else { return }
+        if !translateAnchorCaptured {
+            // 连击中途调小设置里的连击次数会越过 snapshotTap：触发前补拍，保证锚点存在
+            captureTranslateAnchor()
+            HotkeyFileLog.shared.log("translate: snapshot forced before trigger (tap count changed mid-streak)")
+        }
         let anchorText = translateAnchorText
         let anchorEditable = translateAnchorEditable
         // 修饰键敲不进字符：回滚退格数恒为 0；普通键每次连击都敲进一个字符
@@ -1152,13 +1211,41 @@ final class HotkeyInputManager {
         let source: String
         if hadSelection {
             source = anchorText ?? ""
-        } else if let element = focusElement, let full = Self.elementText(element) {
+        } else if let element = focusElement, Self.isEditableElement(element) {
+            // 整框翻译只对可编辑输入框开放：终端缓冲 / 聊天记录 / 整页文档这类
+            // 大容器不该被无差别整包上传（隐私意外 + token 浪费），提示改走划词
+            // 超长先用整数属性预检：kAXValue 是整段 IPC 传输，几 MB 的缓冲
+            // 不该先搬过来再丢弃。属性不可用则回退到整段读取后按长度判断。
+            if let charCount = Self.axElementCharacterCount(element),
+               charCount > Self.maxWholeFieldTranslateChars {
+                HotkeyFileLog.shared.log("translate: whole-field too long (\(charCount) chars, pre-gated) — abort")
+                if isFocusStillValid(pid) { deleteTypedCharacters(typedCount) }
+                onStateChange?(.failure(message: "内容过长（\(charCount) 字符），请选中要翻译的部分"))
+                return
+            }
+            guard let full = Self.elementText(element) else {
+                // 可编辑但读不到内容（部分应用不暴露 kAXValue）：字符键触发的用户
+                // 已把字符敲进框里，必须回滚并提示；静默会让输入凭空丢字
+                if isFocusStillValid(pid) { deleteTypedCharacters(typedCount) }
+                HotkeyFileLog.shared.log("translate: editable but kAXValue unreadable — abort")
+                onStateChange?(.failure(message: "未能读取输入框内容，请重试"))
+                return
+            }
+            guard full.count <= Self.maxWholeFieldTranslateChars else {
+                HotkeyFileLog.shared.log("translate: whole-field too long (\(full.count) chars) — abort")
+                if isFocusStillValid(pid) { deleteTypedCharacters(typedCount) }
+                onStateChange?(.failure(message: "内容过长（\(full.count) 字符），请选中要翻译的部分"))
+                return
+            }
             source = full
         } else {
+            // 焦点不在可编辑输入框：静默放弃，不提示也不回滚——
+            // 静态页面上合成退格可能误触浏览器后退等行为，宁可不碰。
+            // （修饰键触发键没敲进任何字符，静默无副作用；字符键触发的字符落在
+            // 静态页面上本就无处回滚）
             let appID = NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? "?"
             let diagnosis = Self.diagnoseFocusedElement(frontmostPID: pid)
-            HotkeyFileLog.shared.log("translate: no readable text — abort app=\(appID) \(diagnosis)")
-            onStateChange?(.failure(message: "未识别到可翻译内容"))
+            HotkeyFileLog.shared.log("translate: whole-field skipped (not editable) app=\(appID) \(diagnosis)")
             return
         }
 
@@ -1176,13 +1263,14 @@ final class HotkeyInputManager {
         InputFocusLoader.shared.show(element: focusElement)
         onStateChange?(.translating)
         let target = SpeechManager.shared.translateTarget
-        guard let translated = await SpeechManager.shared.translate(trimmed, to: target) else {
+        let outcome = await SpeechManager.shared.translate(trimmed, to: target)
+        guard let translated = outcome.text else {
             // 失败回滚同样要先确认焦点：API 等待期间切走的话，退格会删掉别的应用里的字
             if isFocusStillValid(pid) {
                 HotkeyFileLog.shared.log("translate: failed — rolling back \(typedCount) typed chars")
                 deleteTypedCharacters(typedCount)
             }
-            onStateChange?(.failure(message: "翻译失败"))
+            onStateChange?(.failure(message: outcome.failureReason ?? "翻译失败"))
             return
         }
         // 翻译成功即入历史，与后续写回方式无关（粘贴 / 剪贴板兜底都算交付）
@@ -1235,13 +1323,15 @@ final class HotkeyInputManager {
             return
         }
         let target = SpeechManager.shared.translateTarget
-        if let translated = await SpeechManager.shared.translate(trimmed, to: target) {
+        let outcome = await SpeechManager.shared.translate(trimmed, to: target)
+        if let translated = outcome.text {
             HotkeyFileLog.shared.log("translate: popup result len=\(translated.count)")
             TranslatePopup.shared.showResult(translated)
             TranslationHistory.shared.record(source: trimmed, translated: translated, targetName: target.rawValue)
         } else {
-            HotkeyFileLog.shared.log("translate: popup failed")
-            TranslatePopup.shared.showFailure("翻译失败")
+            let reason = outcome.failureReason ?? "翻译失败"
+            HotkeyFileLog.shared.log("translate: popup failed — \(reason)")
+            TranslatePopup.shared.showFailure(reason)
         }
     }
 
@@ -1537,20 +1627,32 @@ final class HotkeyInputManager {
         pasteboard.setString(text, forType: .string)
         guard sendPasteShortcut() else { return false }
         // 不再固定 sleep 320ms：等待目标应用消费剪贴板，慢应用也能等到粘贴完成再恢复剪贴板
-        await waitForPasteEffect(expectedText: text)
-
+        let delivery = await waitForPasteEffect(expectedText: text)
+        // 返回值语义保持"合成 ⌘V 投递成功"：delivery 只进日志。undetectable（无法验证）
+        // 是光标插入的正常场景，若据此判失败会天天误报剪贴板兜底
+        HotkeyFileLog.shared.log("paste: delivery=\(delivery)")
         restorePasteboard(previousItems: previousItems, baseline: currentBaseline)
         return true
     }
 
-    /// 等待目标应用完成粘贴。
-    /// 能检测时（AX 可用且应用暴露选中文本）轮询选中文本包含转写内容即提前返回，
+    /// 粘贴效果观测结果：⌘V 投递成功 ≠ 目标应用真的粘贴了（密码框/游戏/画布可能无视）。
+    private enum PasteDeliveryOutcome {
+        /// 轮询到目标应用选区里出现了译文——确认进入
+        case confirmed
+        /// 看到了选区但译文始终没进去——基本可断定被目标应用无视
+        case notObserved
+        /// 无法验证（无 AX 权限 / 应用不暴露选中文本，光标插入场景）
+        case undetectable
+    }
+
+    /// 等待目标应用完成粘贴，返回观测结果（只用于日志，不影响粘贴成败判定）。
+    /// 能检测时（AX 可用且应用暴露选中文本）轮询选中文本包含转写内容即提前返回 confirmed，
     /// 慢应用最多等到 1.5s；无法检测时（无 AX 权限 / 应用不暴露选中文本，如光标处插入）
-    /// 320ms 兜底，时序与旧实现一致，不引入额外延迟。
-    private func waitForPasteEffect(expectedText: String) async {
+    /// 320ms 兜底 → undetectable，时序与旧实现一致，不引入额外延迟。
+    private func waitForPasteEffect(expectedText: String) async -> PasteDeliveryOutcome {
         guard AXIsProcessTrusted() else {
             try? await Task.sleep(for: .milliseconds(320))
-            return
+            return .undetectable
         }
         let fallbackDeadline = Date().addingTimeInterval(0.32)
         let hardDeadline = Date().addingTimeInterval(1.5)
@@ -1561,12 +1663,13 @@ final class HotkeyInputManager {
             if let selected, !selected.isEmpty {
                 sawSelection = true
                 if selected.contains(expectedText) || expectedText.contains(selected) {
-                    return // 粘贴内容已进入目标应用
+                    return .confirmed // 粘贴内容已进入目标应用
                 }
             } else if Date() >= fallbackDeadline, !sawSelection {
-                return // 应用不暴露选中文本，按旧时序兜底
+                return .undetectable // 应用不暴露选中文本，按旧时序兜底
             }
         }
+        return sawSelection ? .notObserved : .undetectable
     }
 
     private func restorePasteboard(previousItems: [[NSPasteboard.PasteboardType: Data]], baseline: UUID) {

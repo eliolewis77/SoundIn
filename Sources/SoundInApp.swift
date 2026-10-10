@@ -26,6 +26,66 @@ extension Notification.Name {
     static let settingsWindowOpening = Notification.Name("settingsWindowOpening")
 }
 
+/// 设置窗口的识别标记。菜单栏把已开的设置窗口调到前台时按此查找，
+/// 不按窗口标题匹配——标题改字/本地化会让 contains 匹配静默失效。
+private enum SettingsWindow {
+    static let identifier = NSUserInterfaceItemIdentifier("soundin.settings")
+}
+
+/// 挂进设置窗口内容里，窗口创建时给它打上 SettingsWindow.identifier。
+private struct SettingsWindowTag: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView { TagView() }
+    func updateNSView(_ nsView: NSView, context: Context) {}
+
+    private final class TagView: NSView {
+        override func viewDidMoveToWindow() {
+            super.viewDidMoveToWindow()
+            window?.identifier = SettingsWindow.identifier
+        }
+    }
+}
+
+// MARK: - Hover 反馈
+// grouped Form 把普通按钮渲染成无边框文本，hover 没有任何视觉反馈。
+// HoverableButtonStyle 统一补齐：底态一层极淡底色示意可点，hover 提亮一档 + 指针变手型。
+
+private struct HoverableButtonStyle: ButtonStyle {
+    /// 前景与 hover 底色的基调；危险操作（删除/清空）传 .red
+    var tint: Color = .primary
+    @State private var isHovered = false
+    @Environment(\.isEnabled) private var isEnabled
+
+    func makeBody(configuration: Configuration) -> some View {
+        configuration.label
+            .foregroundStyle(
+                isEnabled ? (configuration.isPressed ? tint.opacity(0.55) : tint) : Color.secondary
+            )
+            .padding(.horizontal, 9)
+            .padding(.vertical, 4)
+            .background(
+                RoundedRectangle(cornerRadius: 6, style: .continuous)
+                    .fill(isHovered && isEnabled ? tint.opacity(0.12) : tint.opacity(0.05))
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .onHover { hovering in
+                isHovered = hovering
+                if hovering {
+                    NSCursor.pointingHand.push()
+                } else {
+                    NSCursor.pop()
+                }
+            }
+            .onDisappear {
+                // hover 态下按钮被移除（条件 Section 随开关显隐）时 onHover(false) 不会来，
+                // 不补 pop 的话手型光标会一直卡在光标栈顶
+                if isHovered {
+                    NSCursor.pop()
+                    isHovered = false
+                }
+            }
+    }
+}
+
 @main
 struct SoundInApp: App {
     @State private var speechManager = SpeechManager.shared
@@ -47,7 +107,11 @@ struct SoundInApp: App {
                     // 之后再激活应用并把设置窗口显式调到前台。
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) {
                         NSApp.activate(ignoringOtherApps: true)
-                        if let window = NSApp.windows.first(where: { $0.title.contains("设置") }) {
+                        // 标识由内容里的 Tag 视图挂载时才打上；首开布局慢时可能晚于本次
+                        // 查找，此时回退按标题匹配（标题在窗口创建时即存在），置前不失效
+                        if let window = NSApp.windows.first(where: {
+                            $0.identifier == SettingsWindow.identifier || $0.title.contains("设置")
+                        }) {
                             window.makeKeyAndOrderFront(nil)
                         }
                     }
@@ -76,6 +140,7 @@ struct SoundInApp: App {
         Window("SoundIn 设置", id: "settings") {
             settingsView
                 .frame(minWidth: 620, minHeight: 430)
+                .background(SettingsWindowTag())
         }
         .defaultSize(width: 680, height: 480)
         .windowResizability(.contentMinSize)
@@ -227,6 +292,10 @@ private struct SettingsView: View {
         }
     }
 
+    /// 侧边栏页项 hover 底色走 listRowBackground（撑满系统行高，与选中高亮几何一致），
+    /// 行内容自己只负责上报 hover 状态。已选中项不再叠加 hover。
+    @State private var hoveredPage: Page?
+
     @Bindable var speech = SpeechManager.shared
     @ObservedObject var history = InputHistory.shared
     @ObservedObject var translationHistory = TranslationHistory.shared
@@ -280,7 +349,16 @@ private struct SettingsView: View {
             if sidebarVisible {
                 List(selection: $selectedPage) {
                     ForEach(Page.allCases) { page in
-                        Label(page.title, systemImage: page.icon).tag(page)
+                        Label(page.title, systemImage: page.icon)
+                            .tag(page)
+                            .onHover { hoveredPage = $0 ? page : (hoveredPage == page ? nil : hoveredPage) }
+                            .listRowBackground(
+                                RoundedRectangle(cornerRadius: 5, style: .continuous)
+                                    .fill(hoveredPage == page && selectedPage != page
+                                          ? Color.primary.opacity(0.08) : Color.clear)
+                                    // 左右留边对齐系统选中框宽度（选中框不是贯穿整行的）
+                                    .padding(.horizontal, 10)
+                            )
                     }
                 }
                 .listStyle(.sidebar)
@@ -537,9 +615,9 @@ private struct SettingsView: View {
                     HotkeyInputManager.shared.holdThreshold = newValue
                 }
             )) {
-                Text("0.5 秒").tag(0.5)
-                Text("0.7 秒").tag(0.7)
-                Text("1.0 秒").tag(1.0)
+                ForEach(HotkeyInputManager.holdThresholdOptions, id: \.self) { threshold in
+                    Text(String(format: "%.1f 秒", threshold)).tag(threshold)
+                }
             }
         }
 
@@ -594,6 +672,7 @@ private struct SettingsView: View {
                 }
             )
         }
+        .buttonStyle(HoverableButtonStyle())
     }
 
     /// 两块快捷键的授权/接管提示合并到一处（去重），只在设置页最底部显示一次
@@ -709,6 +788,7 @@ private struct SettingsView: View {
                     toggleTestRecording()
                 }
                 .disabled(SpeechManager.shared.isRecording && !isTestRecording)
+                .buttonStyle(HoverableButtonStyle())
 
                 Spacer()
             }
@@ -780,10 +860,12 @@ private struct SettingsView: View {
                 newProfileName = ""
                 isAddingProfile = true
             }
+            .buttonStyle(HoverableButtonStyle())
             Button("删除当前配置", role: .destructive) {
                 profilePendingDelete = selected
             }
             .disabled(profileStore.profiles.count <= 1)
+            .buttonStyle(HoverableButtonStyle(tint: .red))
             connectionTestButton(isRunning: isTesting) {
                 await onTest()
             }
@@ -917,22 +999,22 @@ private struct SettingsView: View {
                     Button(isCapturingTranslateKey ? "请按键…（Esc 取消）" : HotkeyInputManager.translateKeyName(translateKey)) {
                         toggleTranslateKeyCapture()
                     }
+                    .buttonStyle(HoverableButtonStyle())
                 }
 
                 Picker("连击次数", selection: $translateTapCount) {
-                    Text("2 次").tag(2)
-                    Text("3 次").tag(3)
-                    Text("4 次").tag(4)
-                    Text("5 次").tag(5)
+                    ForEach(HotkeyInputManager.translateTapCountOptions, id: \.self) { count in
+                        Text("\(count) 次").tag(count)
+                    }
                 }
                 .onChange(of: translateTapCount) { _, newValue in
                     HotkeyInputManager.shared.translateTapCount = newValue
                 }
 
                 Picker("间隔上限", selection: $translateInterval) {
-                    Text("0.4 秒").tag(0.4)
-                    Text("0.6 秒").tag(0.6)
-                    Text("0.9 秒").tag(0.9)
+                    ForEach(HotkeyInputManager.translateIntervalOptions, id: \.self) { interval in
+                        Text(String(format: "%.1f 秒", interval)).tag(interval)
+                    }
                 }
                 .onChange(of: translateInterval) { _, newValue in
                     HotkeyInputManager.shared.translateInterval = newValue
@@ -1098,7 +1180,9 @@ private struct SettingsView: View {
                 }
                 HStack(spacing: 14) {
                     Button("导出") { exportHistory() }
+                        .buttonStyle(HoverableButtonStyle())
                     Button("清空历史", role: .destructive) { isConfirmingClearHistory = true }
+                        .buttonStyle(HoverableButtonStyle(tint: .red))
                 }
             }
         }
@@ -1140,6 +1224,7 @@ private struct SettingsView: View {
                     }
                 }
                 Button("清空翻译历史", role: .destructive) { isConfirmingClearTranslationHistory = true }
+                    .buttonStyle(HoverableButtonStyle(tint: .red))
             }
         } header: {
             Text("翻译记录")
@@ -1197,6 +1282,7 @@ private struct SettingsView: View {
             Button("检查更新") {
                 AppUpdater.shared.checkForUpdatesManually()
             }
+            .buttonStyle(HoverableButtonStyle())
         }
 
         Section("权限状态") {

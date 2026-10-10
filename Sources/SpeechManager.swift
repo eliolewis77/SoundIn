@@ -635,12 +635,9 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
                     return (ConnectionTestResult.ok(detail: "连接成功；服务端未列出「\(cleanModel)」，现有：\(preview)\(suffix)"), false)
                 }
                 return (ConnectionTestResult.ok(detail: "连接成功"), false)
-            case 401, 403:
-                return (ConnectionTestResult.failed(message: "鉴权失败（HTTP \(http.statusCode)），请检查 API Key"), false)
-            case 404:
-                return (ConnectionTestResult.failed(message: "接口路径不存在（404），请确认 Base URL 是否以 /v1 结尾"), false)
             default:
-                return (ConnectionTestResult.failed(message: "服务端返回 HTTP \(http.statusCode)"), false)
+                // 与翻译/润色共用同一套状态码文案，避免两处 switch 漂移
+                return (ConnectionTestResult.failed(message: Self.chatCompletionFailureMessage(http.statusCode)), false)
             }
         } catch {
             HotkeyFileLog.shared.log("conn-test: failed \(normalizedBase) — \(error.localizedDescription)")
@@ -943,75 +940,123 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         HotkeyFileLog.shared.log("rec: transcription finished, length=\(text.count), empty=\(text.isEmpty)")
     }
 
-    /// 用 OpenAI 兼容 Chat Completions 接口润色转写文本。
-    /// 未启用 / 配置缺失 / 请求失败 / 返回为空时一律回退原始转写。
-    func polishTranscription(_ text: String) async -> String {
-        guard polishEnabled, !text.isEmpty else { return text }
+    /// Chat Completions 单次调用的结果：正文（已去首尾空白，可能为空串）
+    /// 或一条按状态码分类、可直接展示给用户的失败原因。
+    enum ChatCompletionOutcome {
+        case content(String)
+        case failure(String)
+    }
 
-        let baseURL = polishAPIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let apiKey = polishAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = polishModelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !baseURL.isEmpty, !model.isEmpty else {
-            HotkeyFileLog.shared.log("polish: skipped (missing baseURL/model)")
-            return text
+    /// POST 一条 OpenAI 兼容 Chat Completions 请求（system + user 两条消息）。
+    /// 2xx 返回 .content；URL 无效 / 请求失败 / 非 2xx / 响应格式不符返回 .failure，
+    /// reason 同时按 logTag 写日志。polish 与 translate 共用。
+    private func postChatCompletion(
+        baseURL: String, apiKey: String, model: String,
+        systemPrompt: String, userText: String,
+        temperature: Double, logTag: String
+    ) async -> ChatCompletionOutcome {
+        let base = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+        let key = apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
+        let name = model.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !base.isEmpty, !name.isEmpty else {
+            HotkeyFileLog.shared.log("\(logTag): skipped (missing baseURL/model)")
+            return .failure("未配置接口（Base URL / 模型名），请在设置中补全")
         }
-        let customPrompt = polishPromptTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
-        let systemPrompt = customPrompt.isEmpty ? Self.defaultPolishPrompt : customPrompt
-
-        let normalizedBase = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
+        let normalizedBase = base.hasSuffix("/") ? String(base.dropLast()) : base
         guard let url = URL(string: normalizedBase)?.appendingPathComponent("chat/completions") else {
-            HotkeyFileLog.shared.log("polish: invalid baseURL")
-            return text
+            HotkeyFileLog.shared.log("\(logTag): invalid baseURL")
+            return .failure("API 地址无效，请在设置中检查")
         }
 
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        if !key.isEmpty {
+            request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
         }
         let body: [String: Any] = [
-            "model": model,
-            "temperature": 0,
+            "model": name,
+            "temperature": temperature,
             "messages": [
                 ["role": "system", "content": systemPrompt],
-                ["role": "user", "content": text]
+                ["role": "user", "content": userText]
             ]
         ]
-        guard let payload = try? JSONSerialization.data(withJSONObject: body) else { return text }
+        guard let payload = try? JSONSerialization.data(withJSONObject: body) else {
+            return .failure("请求构造失败")
+        }
         request.httpBody = payload
 
         do {
-            let (data, _) = try await URLSession.shared.data(for: request)
+            // URLSession 对 4xx/5xx 不抛错，错误响应从 data 正常返回——必须自己看状态码，
+            // 否则 401（Key 错）和断网在调用方看来是同一种"翻译失败"
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else {
+                return .failure("无效的服务端响应")
+            }
+            guard (200..<300).contains(http.statusCode) else {
+                let reason = Self.chatCompletionFailureMessage(http.statusCode)
+                HotkeyFileLog.shared.log("\(logTag): HTTP \(http.statusCode) — \(reason)")
+                return .failure(reason)
+            }
             guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let choices = json["choices"] as? [[String: Any]],
                   let message = choices.first?["message"] as? [String: Any],
                   let content = message["content"] as? String else {
-                HotkeyFileLog.shared.log("polish: unexpected response format")
-                return text
+                HotkeyFileLog.shared.log("\(logTag): unexpected response format")
+                return .failure("服务端响应格式不符，请确认该接口是 Chat Completions 端点")
             }
-            let polished = content.trimmingCharacters(in: .whitespacesAndNewlines)
-            HotkeyFileLog.shared.log("polish: ok, length \(text.count) -> \(polished.count)")
-            return polished.isEmpty ? text : polished
+            return .content(content.trimmingCharacters(in: .whitespacesAndNewlines))
         } catch {
-            HotkeyFileLog.shared.log("polish: failed — \(error.localizedDescription)")
-            return text
+            HotkeyFileLog.shared.log("\(logTag): failed — \(error.localizedDescription)")
+            return .failure("无法连接：\(error.localizedDescription)")
         }
     }
 
-    /// 连击翻译：使用翻译专属的接口配置档（设置 → 翻译，与优化档相互独立）。
-    /// 与 polishTranscription 的关键差异是**失败时返回 nil 而非原文**——
-    /// 调用方需要区分"翻译成功"和"翻译失败"才能决定是否回滚输入框。
-    func translate(_ text: String, to target: TranslateTarget) async -> String? {
-        let baseURL = translateAPIBaseURL.trimmingCharacters(in: .whitespacesAndNewlines)
-        let apiKey = translateAPIKey.trimmingCharacters(in: .whitespacesAndNewlines)
-        let model = translateModelName.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !baseURL.isEmpty, !model.isEmpty else {
-            HotkeyFileLog.shared.log("translate: skipped (missing baseURL/model)")
-            return nil
+    /// 按状态码归类失败文案，口径与连接测试（executeConnectionTest）一致。
+    private nonisolated static func chatCompletionFailureMessage(_ code: Int) -> String {
+        switch code {
+        case 401, 403:
+            return "鉴权失败（HTTP \(code)），请检查 API Key"
+        case 402:
+            return "余额 / 配额不足（HTTP 402），请检查服务商账户"
+        case 404:
+            return "接口路径不存在（404），请确认 Base URL 是否以 /v1 结尾"
+        case 429:
+            return "请求过于频繁（429），请稍后再试"
+        case 500...599:
+            return "服务端错误（HTTP \(code)），请稍后再试"
+        default:
+            return "服务端返回 HTTP \(code)"
         }
+    }
 
+    /// 用 OpenAI 兼容 Chat Completions 接口润色转写文本。
+    /// 未启用 / 配置缺失 / 请求失败 / 返回为空时一律回退原始转写。
+    func polishTranscription(_ text: String) async -> String {
+        guard polishEnabled, !text.isEmpty else { return text }
+
+        let customPrompt = polishPromptTemplate.trimmingCharacters(in: .whitespacesAndNewlines)
+        let systemPrompt = customPrompt.isEmpty ? Self.defaultPolishPrompt : customPrompt
+        guard case .content(let polished) = await postChatCompletion(
+            baseURL: polishAPIBaseURL,
+            apiKey: polishAPIKey,
+            model: polishModelName,
+            systemPrompt: systemPrompt,
+            userText: text,
+            temperature: 0,
+            logTag: "polish"
+        ), !polished.isEmpty else { return text }
+
+        HotkeyFileLog.shared.log("polish: ok, length \(text.count) -> \(polished.count)")
+        return polished
+    }
+
+    /// 连击翻译：使用翻译专属的接口配置档（设置 → 翻译，与优化档相互独立）。
+    /// 成功返回 (text, nil)；失败返回 (nil, 可直接展示的失败原因)——
+    /// 调用方拿 reason 放进弹窗 / HUD，用户不再只能看到笼统的"翻译失败"。
+    func translate(_ text: String, to target: TranslateTarget) async -> (text: String?, failureReason: String?) {
         // 自动方向：中文（含繁体）→ 英语，其他语言（含英语）→ 简体中文。
         // 让模型判断语言而不是本地正则启发式：省一次检测逻辑维护，
         // 混合文本（英文段落里夹个中文词）也能按主体语言选对方向。
@@ -1021,49 +1066,24 @@ final class SpeechManager: NSObject, SFSpeechRecognizerDelegate {    static let 
         } else {
             systemPrompt = "将用户给出的文本翻译为\(target.promptName)。只输出译文，不要解释、不要添加任何内容。"
         }
-        let normalizedBase = baseURL.hasSuffix("/") ? String(baseURL.dropLast()) : baseURL
-        guard let url = URL(string: normalizedBase)?.appendingPathComponent("chat/completions") else {
-            HotkeyFileLog.shared.log("translate: invalid baseURL")
-            return nil
-        }
-
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.timeoutInterval = 30
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        if !apiKey.isEmpty {
-            request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        }
-        let body: [String: Any] = [
-            "model": model,
-            "temperature": 0.2,
-            "messages": [
-                ["role": "system", "content": systemPrompt],
-                ["role": "user", "content": text]
-            ]
-        ]
-        guard let payload = try? JSONSerialization.data(withJSONObject: body) else { return nil }
-        request.httpBody = payload
-
-        do {
-            let (data, _) = try await URLSession.shared.data(for: request)
-            guard let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let choices = json["choices"] as? [[String: Any]],
-                  let message = choices.first?["message"] as? [String: Any],
-                  let content = message["content"] as? String else {
-                HotkeyFileLog.shared.log("translate: unexpected response format")
-                return nil
-            }
-            let translated = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        switch await postChatCompletion(
+            baseURL: translateAPIBaseURL,
+            apiKey: translateAPIKey,
+            model: translateModelName,
+            systemPrompt: systemPrompt,
+            userText: text,
+            temperature: 0.2,
+            logTag: "translate"
+        ) {
+        case .content(let translated):
             guard !translated.isEmpty else {
                 HotkeyFileLog.shared.log("translate: empty result")
-                return nil
+                return (nil, "服务端返回了空译文")
             }
             HotkeyFileLog.shared.log("translate: ok (\(target.rawValue)), length \(text.count) -> \(translated.count)")
-            return translated
-        } catch {
-            HotkeyFileLog.shared.log("translate: failed — \(error.localizedDescription)")
-            return nil
+            return (translated, nil)
+        case .failure(let reason):
+            return (nil, reason)
         }
     }
 

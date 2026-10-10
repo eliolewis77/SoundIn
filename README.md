@@ -1,16 +1,34 @@
 # SoundIn（声入）
 
-A minimal menu-bar speech-to-text app for macOS. Record audio with a global hotkey, transcribe it through any OpenAI-compatible Whisper-class API you configure, and have the text typed directly at your cursor.
+A minimal menu-bar dictation & translation app for macOS. Hold a hotkey to dictate — transcribed with on-device Apple speech recognition or any OpenAI-compatible API — and the text lands right at your cursor. Select text in any app and rapid-tap a trigger key to translate it in place.
 
 ## Features
 
-- 菜单栏（状态栏）常驻，录音时显示轻量 HUD 波形。
-- 两套独立全局快捷键：**单击切换**开/关 + **按住说话**（松手停止，可设 0.5 / 0.7 / 1.0s 触发阈值）。
-- 可插拔转写引擎：任何兼容 OpenAI `/audio/transcriptions`（Whisper 类）的端点。
-- 可选第二档「润色」配置（如一个 LLM 端点）对原始转写做二次加工。
-- 转写历史 + GitHub 风格活跃度热力图。
-- 「去掉句末标点」开关。
-- 本地优先：API Key 仅存在本机 Keychain / UserDefaults，音频除发往你配置的端点外不会离开本机。
+### 语音听写
+
+- 菜单栏常驻，录音时显示轻量 HUD（实时波形，可在设置中关闭）。
+- 两套独立全局快捷键：**单击切换**开/关 + **按住说话**（松手停止，长按阈值可设 0.5 / 0.7 / 1.0s）。
+- 转写结果直接输入到光标处；开始录音时目标应用已有选中文本的，结果**替换选中内容**。
+- 「去掉转写结果句末标点」开关。
+
+### 划词翻译
+
+- **连击翻译**：在任意应用选中文字，快速连击触发键（默认连按 3 次 Shift，次数与间隔可调）即翻译成目标语言。
+- 智能写回：输入框内原地替换选区 / 写回光标处；网页、PDF 等不可编辑场景则改在选区旁弹出**翻译浮窗**（不抢焦点、可复制、自动消失）。
+
+### 识别引擎与 AI 配置
+
+- 双识别方式：**本机 Apple 语音识别**（免配置）或任何 OpenAI 兼容 `/audio/transcriptions`（Whisper 类）端点；识别语言（跟随系统 / 中 / 英 / 日）与麦克风可自选。
+- **长录音分段转写**（API 模式）：按静音自动切段、边录边并发转写，松手即得全文。
+- **多接口配置档**：转写、文字优化（润色）、翻译三处从同一套配置档（Base URL / API Key / 模型名）中各自选用；API Key 可留空（本地网关免 Key）。
+- **文字优化**：可选配一个 LLM 端点（OpenAI 兼容 Chat Completions）对原始转写做二次加工，提示词可自定义、一键恢复默认。
+- **翻译**同样走 OpenAI 兼容 Chat Completions 端点，目标语言可设。
+
+### 统计与系统
+
+- 转写历史 + GitHub 风格活跃度热力图 + 翻译记录，保留条数可调。
+- 开机时启动、Sparkle 自动更新（自动检查可关，支持手动检查）、权限状态自检。
+- 本地优先：API Key 仅存本机 Keychain / UserDefaults，音频除发往你配置的端点外不会离开本机。
 
 ## Requirements
 
@@ -51,30 +69,25 @@ macOS 会请求**麦克风**权限；为把转写结果输入到光标处，可�
 | --- | --- |
 | `Sources/` | Swift 源码：入口、设置页、热键管理、语音管理、HUD、统计与热力图 |
 | `Resources/` | 应用图标与资源 |
-| `design/` | UI 设计稿与评审笔记（设计演进记录） |
+| `design/` | UI 设计稿（设计演进记录，本地文件，不入库） |
 | `build-app.sh` | release 编译 + 打包 + 签名 |
+| `scripts/release.sh` | 本地发版：Developer ID 签名 → 公证 → GitHub Release → appcast → gh-pages |
 | `Package.swift` | SwiftPM 包定义（executable target，产物名为 `SoundIn`） |
 
 ## Releases
 
-发版是**全自动**的：把 `Info.plist` 里的 `CFBundleShortVersionString` 改成一个新版本号（如 `1.0.1`）并推送到 `main`，GitHub Actions 会自动构建 `.app`、打 `vX.Y.Z` 标签、并创建 GitHub Release（自动生成变更说明，并附上构建产物 `SoundIn.app.zip`）。同一个版本号若已发过版会自动跳过，不会重复发版。
+发版走本地脚本 [scripts/release.sh](scripts/release.sh)。CI（GitHub Actions）没有开发者证书，ad-hoc 签名的产物曾因 Hardened Runtime 校验拒绝内嵌 Sparkle 框架而启动即崩（1.0.2 事故），故发版不依赖 CI。
 
-> 注：未配置签名密钥时，CI 构建使用**临时签名（ad-hoc）**，产物仅供版本归档。要在你自己的 Mac 上正常使用该 `.app`，请用本地开发者证书重新签名，或按上面的 `Build & Run` 在本机自行构建。
+步骤：
 
-### 让发版产物可直接双击打开（真实签名 + 公证）
+1. 把 `Info.plist` 里的 `CFBundleShortVersionString` / `CFBundleVersion` 改成新版本号（如 `1.0.11`）
+2. 运行 `./scripts/release.sh`
 
-在仓库 **Settings → Secrets and variables → Actions** 里配置以下密钥后，CI 会自动导入证书、用 Developer ID 签名、并对产物做 notarize + staple，别人下载后可直接打开：
+脚本自动完成：构建 → Developer ID 签名 → 公证（notarize + staple）→ 创建 GitHub Release（自动生成变更说明，附 `SoundIn.app.zip`）→ 生成 appcast 并推送到 `gh-pages`。Sparkle 客户端从 `https://eliolewis77.github.io/SoundIn/appcast.xml` 拉取更新。远端已有同名 tag 时脚本会直接拒绝，防止重复发版。
 
-| Secret | 内容 |
-| --- | --- |
-| `MACOS_SIGN_CERT_P12` | 从钥匙串导出的 **Developer ID Application** 证书 + 私钥 `.p12`，做 base64 后的字符串 |
-| `MACOS_SIGN_CERT_PASSWORD` | 导出 `.p12` 时设的密码 |
-| `MACOS_SIGN_IDENTITY` | 证书身份，如 `Developer ID Application: Your Name (TEAMID)` |
-| `MACOS_NOTARIZE_KEY_P8` | App Store Connect API Key 的 `.p8` 文件，做 base64 后的字符串 |
-| `MACOS_NOTARIZE_KEY_ID` | API Key ID（如 `ABCDE12345`） |
-| `MACOS_NOTARIZE_ISSUER` | Issuer ID（UUID） |
-
-公证要求证书必须是 **Developer ID Application**（不是普通的 Apple Development / Distribution），且需要付费的 Apple Developer 账户。未配置这些密钥时自动退回临时签名，发版不会失败。
+> 前置条件（一次性，均已就绪）：钥匙串里的 Developer ID Application 证书、`xcrun notarytool store-credentials` 的公证凭据、登录钥匙串里的 Sparkle EdDSA 私钥。详见 `scripts/release.sh` 头部注释。
+>
+> [.github/workflows/release.yml](.github/workflows/release.yml) 仅保留 `workflow_dispatch` 手动触发作兜底，产物为 ad-hoc 签名、仅供版本归档，正常发版不要走它。
 
 ## License
 
