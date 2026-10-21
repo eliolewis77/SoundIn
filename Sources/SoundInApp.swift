@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import ApplicationServices
+import CoreGraphics
 import ServiceManagement
 import Speech
 import Combine
@@ -97,6 +98,9 @@ struct SoundInApp: App {
         MenuBarExtra {
             VStack {
                 Text(statusText).foregroundStyle(.secondary)
+                Button("截图") {
+                    HotkeyInputManager.shared.triggerScreenshot()
+                }
                 Button("设置") {
                     // 常规原生窗口：可缩放、三个窗口按钮均可用
                     openWindow(id: "settings")
@@ -234,9 +238,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// 一律拒绝：状态项暂时不可见时核心功能（快捷键听写/连击翻译）照常可用，
     /// 菜单栏恢复后图标自然回来。
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if Self.userRequestedQuit { return .terminateNow }
+        if Self.userRequestedQuit {
+            HotkeyInputManager.shared.cancelInFlightScreenshot()
+            return .terminateNow
+        }
         let elapsed = Date().timeIntervalSince(launchTime)
-        guard elapsed < 10 else { return .terminateNow }
+        guard elapsed < 10 else {
+            HotkeyInputManager.shared.cancelInFlightScreenshot()
+            return .terminateNow
+        }
         HotkeyFileLog.shared.log("app: suppressed spurious terminate at \(String(format: "%.2f", elapsed))s after launch")
         return .terminateCancel
     }
@@ -308,11 +318,12 @@ private struct SettingsView: View {
     @State private var profilePendingDelete: APIProfile?
     @State private var clickShortcut: HotkeyInputManager.Shortcut = HotkeyInputManager.shared.clickShortcut
     @State private var holdShortcut: HotkeyInputManager.Shortcut = HotkeyInputManager.shared.holdShortcut
+    @State private var screenshotShortcut: HotkeyInputManager.Shortcut = HotkeyInputManager.shared.screenshotShortcut
     @State private var holdThreshold: Double = HotkeyInputManager.shared.holdThreshold
     @State private var stripTrailingPunctuation: Bool = HotkeyInputManager.shared.stripTrailingPunctuation
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var capturingSlot: Slot? = nil
-    private enum Slot: Equatable { case click, hold }
+    private enum Slot: Equatable { case click, hold, screenshot }
     @State private var registrationError: String?
     @State private var isTestRecording = false
     @State private var isTranscribing = false
@@ -621,6 +632,17 @@ private struct SettingsView: View {
             }
         }
 
+        Section("框选截图") {
+            HStack {
+                Text("截图快捷键")
+                Spacer()
+                shortcutCaptureButton(.screenshot, title: screenshotShortcut.displayText)
+            }
+            Text("按下快捷键后拖拽框选，松开即复制到剪贴板，到目标应用 ⌘V 粘贴；Esc 取消。需要「屏幕录制」权限。默认 F1 在系统默认布局（F1 为亮度键）下按 fn+F1 触发。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+        }
+
         Section {
             Text("单击快捷键：点一下开始，再点一下结束。长按快捷键：按住说话，松开即停。两个快捷键同时生效。")
                 .font(.footnote)
@@ -665,6 +687,16 @@ private struct SettingsView: View {
                     case .hold:
                         holdShortcut = newShortcut
                         HotkeyInputManager.shared.holdShortcut = newShortcut
+                    case .screenshot:
+                        // 纯修饰键没有对应触发路径（Carbon 无法注册，也无 flagsChanged 处理），
+                        // 接受会让设置"无声失效"，直接拒绝并提示
+                        if newShortcut.isModifierOnly {
+                            registrationError = "截图快捷键不支持纯修饰键，请使用字母、数字或功能键组合"
+                            capturingSlot = nil
+                            return
+                        }
+                        screenshotShortcut = newShortcut
+                        HotkeyInputManager.shared.screenshotShortcut = newShortcut
                     }
                     capturingSlot = nil
                     // 注册失败（组合键被占用）立即提示，而不是静默不生效
@@ -675,16 +707,25 @@ private struct SettingsView: View {
         .buttonStyle(HoverableButtonStyle())
     }
 
-    /// 两块快捷键的授权/接管提示合并到一处（去重），只在设置页最底部显示一次
+    /// 三块快捷键的授权/接管提示合并到一处（去重），只在设置页最底部显示一次
     private var consolidatedShortcutWarnings: [String] {
         var seen = Set<String>()
         var result: [String] = []
-        for shortcut in [clickShortcut, holdShortcut] {
+        for shortcut in [clickShortcut, holdShortcut, screenshotShortcut] {
             if shortcut.isModifierOnly {
                 let msg = "修饰键热键需要在「系统设置 → 隐私与安全性 → 输入监控」中授权 SoundIn，才能在所有应用中生效。"
                 if seen.insert(msg).inserted { result.append(msg) }
             } else if !shortcut.modifiers.contains([.command, .control, .option, .shift]) {
                 let msg = "当前是单键热键：该按键会被全局接管，在其他应用中按下它将不会正常输入。"
+                if seen.insert(msg).inserted { result.append(msg) }
+            }
+        }
+        // 截图键与单击/长按两两查重：Carbon 允许同组合重复注册（不报错），按键被先注册
+        // 槽位吃掉后截图静默失灵，必须提示。（单击与长按同键是出厂默认态，属历史行为，不在此查）
+        for slot in [("单击", clickShortcut), ("长按", holdShortcut)] {
+            if slot.1.keyCode == screenshotShortcut.keyCode,
+               slot.1.modifiers == screenshotShortcut.modifiers {
+                let msg = "截图快捷键与\(slot.0)快捷键相同，按键会被抢占导致截图无法触发，请更换其中一个。"
                 if seen.insert(msg).inserted { result.append(msg) }
             }
         }
@@ -703,7 +744,7 @@ private struct SettingsView: View {
             if seen.insert(msg).inserted { result.append(msg) }
         }
         let translateFamily = HotkeyInputManager.modifierFamily(of: translateKey)
-        for shortcut in [clickShortcut, holdShortcut] {
+        for shortcut in [clickShortcut, holdShortcut, screenshotShortcut] {
             if shortcut.isModifierOnly {
                 // 此分支里 family 必非 nil；translateFamily 为 nil（普通键触发）时不等，不误报
                 if let family = HotkeyInputManager.modifierFamily(of: shortcut.keyCode),
@@ -712,7 +753,7 @@ private struct SettingsView: View {
                 }
             } else if !shortcut.modifiers.contains([.command, .control, .option, .shift]),
                       shortcut.keyCode == translateKey {
-                add("翻译触发键与单击/长按快捷键是同一个按键：该键已被全局接管，翻译收不到按键，请更换其中一个。")
+                add("翻译触发键与单击/长按/截图快捷键是同一个按键：该键已被全局接管，翻译收不到按键，请更换其中一个。")
             }
         }
         return result
@@ -1294,7 +1335,9 @@ private struct SettingsView: View {
                          panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
             permissionRow(title: "辅助功能（按键监听/模拟粘贴）", granted: auth.axTrusted, undetermined: false,
                          panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
-            Text("未授权项可点「去授权」直达对应设置面板；辅助功能换版本后失效时，在面板中删除旧条目重新添加即可。")
+            permissionRow(title: "屏幕录制（框选截图）", granted: auth.screenCaptureAuthorized, undetermined: false,
+                         panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+            Text("未授权项可点「去授权」直达对应设置面板；辅助功能换版本后失效时，在面板中删除旧条目重新添加即可；「屏幕录制」授权后需重启 SoundIn 才能生效。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }
@@ -1303,7 +1346,7 @@ private struct SettingsView: View {
             authRevision += 1
         }
         // 应用内系统授权弹窗里点「允许」不会走 activation 事件 → 可见期间每 2 秒兜底轮询
-        //（三次 TCC 查询开销可忽略；区块随页面切走自动停表）
+        //（四次 TCC 查询开销可忽略；区块随页面切走自动停表）
         .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
             authRevision += 1
         }
@@ -1315,14 +1358,17 @@ private struct SettingsView: View {
     }
 
     private var authSnapshot: (micAuthorized: Bool, micNotDetermined: Bool,
-                               speechAuthorized: Bool, speechNotDetermined: Bool, axTrusted: Bool) {
+                               speechAuthorized: Bool, speechNotDetermined: Bool,
+                               axTrusted: Bool, screenCaptureAuthorized: Bool) {
         _ = authRevision  // 建立依赖：仅为此让 SwiftUI 在刷新计数变化时重算本快照
         return (
             micAuthorized: AVCaptureDevice.authorizationStatus(for: .audio) == .authorized,
             micNotDetermined: AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined,
             speechAuthorized: SFSpeechRecognizer.authorizationStatus() == .authorized,
             speechNotDetermined: SFSpeechRecognizer.authorizationStatus() == .notDetermined,
-            axTrusted: AXIsProcessTrusted()
+            axTrusted: AXIsProcessTrusted(),
+            // 屏幕录制无法区分「未决定」与「已拒绝」，统一按未授权处理（undetermined: false）
+            screenCaptureAuthorized: CGPreflightScreenCaptureAccess()
         )
     }
 

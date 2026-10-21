@@ -86,7 +86,14 @@ final class HotkeyInputManager {
     static let shared = HotkeyInputManager()
 
     /// 最近一次快捷键注册的结果；nil 表示成功
-    private(set) var lastRegistrationError: String?
+    /// 各槽位当前的注册错误（label → 文案）：成功只清自己槽位的错误。
+    /// 注册按 click→hold→screenshot 顺序全量重跑，若用单一变量，后注册槽位的
+    /// 成功会把先注册槽位的失败覆盖掉（review 2026-10-21 发现的回归）
+    private var lastRegistrationErrors: [String: String] = [:]
+    /// 当前注册错误（按注册顺序取第一个），设置页录制完成后读这里做即时反馈
+    var lastRegistrationError: String? {
+        lastRegistrationErrors["click"] ?? lastRegistrationErrors["hold"] ?? lastRegistrationErrors["screenshot"]
+    }
 
     struct Shortcut: Codable, Equatable {
         var keyCode: UInt16
@@ -150,7 +157,7 @@ final class HotkeyInputManager {
             42: "\\", 43: ",", 44: "/", 47: ".", 50: "`",
             // 功能键
             96: "F5", 97: "F6", 98: "F7", 99: "F3", 100: "F8", 101: "F9",
-            103: "F11", 109: "F10", 111: "F12",
+            103: "F11", 109: "F10", 111: "F12", 120: "F2", 122: "F1",
             49: "Space"
         ]
     }
@@ -173,8 +180,8 @@ final class HotkeyInputManager {
             .intersection(.deviceIndependentFlagsMask).rawValue
     )
 
-    /// 两块独立触发：单击切换 + 长按说话，两个快捷键同时生效
-    enum TriggerKind: String { case click, hold }
+    /// 三块独立触发：单击切换 + 长按说话 + 框选截图，快捷键互不影响
+    enum TriggerKind: String { case click, hold, screenshot }
     enum CaptureTarget: String { case click, hold }
 
     var clickShortcut: Shortcut = loadClickShortcut() {
@@ -182,6 +189,17 @@ final class HotkeyInputManager {
     }
     var holdShortcut: Shortcut = loadHoldShortcut() {
         didSet { saveHoldShortcut(); registerCarbonHotKey() }
+    }
+    static let defaultScreenshotShortcut = Shortcut(
+        // F1 键码 122。注意布局差异：「将 F1、F2 等键用作标准功能键」关闭（系统默认）时，
+        // 裸按 F1 发出的是亮度媒体事件而非 F1 键码，fn+F1 才会发出 F1 键码；开启后裸 F1
+        // 直接触发。Carbon 全局热键无法把 fn 单独注册为修饰键，故按 F1 键码注册
+        keyCode: UInt16(kVK_F1),
+        modifiersRawValue: NSEvent.ModifierFlags.function
+            .intersection(.deviceIndependentFlagsMask).rawValue
+    )
+    var screenshotShortcut: Shortcut = loadScreenshotShortcut() {
+        didSet { saveScreenshotShortcut(); registerCarbonHotKey() }
     }
 
     static let defaultHoldThreshold: TimeInterval = 0.7
@@ -470,7 +488,7 @@ final class HotkeyInputManager {
             triggerKeyCaptureReject?("「\(name)」会改变输入状态，请改用字母、数字或标点")
             return
         }
-        if let clash = [clickShortcut, holdShortcut].first(where: { translateKeyConflicts(with: $0, candidate: code) }) {
+        if let clash = [clickShortcut, holdShortcut, screenshotShortcut].first(where: { translateKeyConflicts(with: $0, candidate: code) }) {
             triggerKeyCaptureReject?("「\(clash.displayText)」已被语音快捷键占用，请换一个键")
             return
         }
@@ -842,8 +860,14 @@ final class HotkeyInputManager {
                 )
                 guard result == noErr, keyCode.signature == OSType(0x5653484B) else { return noErr } // VHK
 
-                // id=1 → 单击触发；id=2 → 长按触发
-                let kind: TriggerKind = keyCode.id == 2 ? .hold : .click
+                // id=1 → 单击触发；id=2 → 长按触发；id=3 → 框选截图
+                let kind: TriggerKind
+                switch keyCode.id {
+                case 1: kind = .click
+                case 2: kind = .hold
+                case 3: kind = .screenshot
+                default: return noErr
+                }
                 let isRelease = GetEventKind(event) == UInt32(kEventHotKeyReleased)
                 Task { @MainActor in
                     if isRelease {
@@ -866,6 +890,7 @@ final class HotkeyInputManager {
 
         registerOneCarbonHotKey(id: 1, shortcut: clickShortcut, label: "click")
         registerOneCarbonHotKey(id: 2, shortcut: holdShortcut, label: "hold")
+        registerOneCarbonHotKey(id: 3, shortcut: screenshotShortcut, label: "screenshot")
     }
 
     /// 注册单个 Carbon 热键。纯修饰键热键无法走 Carbon（会拦截修饰键本身），交给 NSEvent 的 flagsChanged 监听。
@@ -892,12 +917,12 @@ final class HotkeyInputManager {
         )
         if registerStatus == noErr {
             hotKeyRefs[id] = ref
-            lastRegistrationError = nil
+            lastRegistrationErrors.removeValue(forKey: label)
             logger.debug("hotkey registered (\(label)): \(shortcut.displayText, privacy: .public)")
             HotkeyFileLog.shared.log("hotkey registered ok (\(label)): \(shortcut.displayText)")
         } else {
             // 组合键被系统或其他应用占用时会注册失败——必须暴露给用户而不是静默吞掉
-            lastRegistrationError = "「\(shortcut.displayText)」注册失败，可能已被系统或其他应用占用，请换一个组合键"
+            lastRegistrationErrors[label] = "「\(shortcut.displayText)」注册失败，可能已被系统或其他应用占用，请换一个组合键"
             logger.error("RegisterEventHotKey failed (\(registerStatus, privacy: .public)) for \(shortcut.displayText, privacy: .public)")
             HotkeyFileLog.shared.log("hotkey register FAILED (\(label)) status=\(registerStatus) for \(shortcut.displayText)")
         }
@@ -921,6 +946,8 @@ final class HotkeyInputManager {
             if isActive { stop() } else { startRecording() }
         case .hold:
             press(.hold)
+        case .screenshot:
+            triggerScreenshot()
         }
     }
 
@@ -934,7 +961,9 @@ final class HotkeyInputManager {
 
     // MARK: - 触发分派（单击切换 / 长按说话）
 
-    private func press(_ kind: TriggerKind) {
+    // press/release 只服务需要按下-松手状态机的单击/长按；截图是触发即完成的一次性
+    // 动作，在 handleTrigger 分派层直接执行，不走这里（参数类型用 CaptureTarget 锁死）
+    private func press(_ kind: CaptureTarget) {
         switch kind {
         case .click:
             if isActive { stop() } else { startRecording() }
@@ -952,12 +981,14 @@ final class HotkeyInputManager {
                     return
                 }
                 self.startRecording()
-                self.isHoldActive = true
+                // startRecording 可能被截图框选等前置状态拒绝；只有真正启动才置位，
+                // 否则迟到的松手会经 release(.hold) 误杀后续 click 开启的录音
+                if self.startRecording() { self.isHoldActive = true }
             }
         }
     }
 
-    private func release(_ kind: TriggerKind) {
+    private func release(_ kind: CaptureTarget) {
         switch kind {
         case .click:
             break
@@ -968,6 +999,60 @@ final class HotkeyInputManager {
             isShortcutHeld = false
             isHoldActive = false
         }
+    }
+
+    // MARK: - 框选截图（即截即贴）
+
+    /// 截图子进程（/usr/sbin/screencapture -i -c）。非 nil 即框选十字线在屏上。
+    /// 强引用持有：防止 terminationHandler 随进程对象释放而丢失
+    private var screenshotProcess: Process?
+    /// 系统框选十字线是否在屏幕上（screencapture -i 运行期间）
+    private var isScreenshotInFlight: Bool { screenshotProcess != nil }
+
+    /// 触发框选截图：调起系统原生框选 UI，松手后图片进剪贴板。
+    /// Carbon 热键（id=3）、NSEvent 兜底路径、菜单栏菜单三处共用此入口。
+    func triggerScreenshot() {
+        // 互斥：十字线已弹 / 长按手势待决（否则十字线弹出后 0.7s 阈值到点会意外开始录音）/
+        // 录音中 / 收尾中 / 设置页正在录制快捷键或触发键——一律忽略
+        guard screenshotProcess == nil, !isShortcutHeld, !isActive, !isFinishing, !isCaptureMode,
+              !Self.isShortcutCaptureActive, !Self.isTriggerKeyCaptureActive else {
+            HotkeyFileLog.shared.log("screenshot: ignored (busy)")
+            return
+        }
+        // 屏幕录制 TCC：未授权时 screencapture 只能截到壁纸。首次触发借 request 弹系统授权框；
+        // 授权对已运行进程不生效，授权后必须重启应用，HUD 文案里要写明
+        guard CGPreflightScreenCaptureAccess() else {
+            HotkeyFileLog.shared.log("screenshot: screen capture not authorized, requesting")
+            _ = CGRequestScreenCaptureAccess()
+            onStateChange?(.permissionDenied(message: "需要「屏幕录制」权限才能截图，请在系统设置中授权后重启 SoundIn"))
+            return
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        // -i 交互式框选（阻塞到用户完成，故必须异步收尾）；-c 结果进剪贴板而非文件
+        process.arguments = ["-i", "-c"]
+        process.terminationHandler = { proc in
+            let code = proc.terminationStatus
+            Task { @MainActor [weak self] in
+                self?.screenshotProcess = nil
+                // 成功不弹提示（系统框选本身即反馈）；非 0 多为 Esc 取消，属常态操作，
+                // 弹失败提示会次次打扰——只记日志
+                HotkeyFileLog.shared.log("screenshot: finished exit=\(code)")
+            }
+        }
+        do {
+            try process.run()
+        } catch {
+            HotkeyFileLog.shared.log("screenshot: spawn failed — \(error.localizedDescription)")
+            onStateChange?(.failure(message: "无法启动截图工具：\(error.localizedDescription)"))
+            return
+        }
+        screenshotProcess = process
+    }
+
+    /// 退出前回收框选子进程：不回收的话 app 退出后十字线仍挂在屏幕上无人认领
+    func cancelInFlightScreenshot() {
+        screenshotProcess?.terminate()
     }
 
     var displayShortcut: String { clickShortcut.displayText }
@@ -1007,6 +1092,12 @@ final class HotkeyInputManager {
         if holdShortcut.matches(event) {
             if event.type == .keyDown { press(.hold) }
             else if event.type == .keyUp { release(.hold) }
+            return true
+        }
+        if screenshotShortcut.matches(event) {
+            // 框选截图是按下即触发的一次性动作；keyUp 与 hold 快捷键同理一并吞掉，
+            // 避免漏进连击翻译的观察路径
+            if event.type == .keyDown { triggerScreenshot() }
             return true
         }
 
@@ -1420,6 +1511,18 @@ final class HotkeyInputManager {
             UserDefaults.standard.set(data, forKey: "voiceInputHoldShortcut")
         }
     }
+    private static func loadScreenshotShortcut() -> Shortcut {
+        guard let data = UserDefaults.standard.data(forKey: "voiceInputScreenshotShortcut"),
+              let s = try? JSONDecoder().decode(Shortcut.self, from: data) else {
+            return defaultScreenshotShortcut
+        }
+        return s
+    }
+    private func saveScreenshotShortcut() {
+        if let data = try? JSONEncoder().encode(screenshotShortcut) {
+            UserDefaults.standard.set(data, forKey: "voiceInputScreenshotShortcut")
+        }
+    }
 
     /// 判定转写结果是否"无实际内容"：空、纯标点、或纯语气词——
     /// 语音转写模型对静音音频的典型幻觉输出（如"嗯。"）。命中时视为没说话，
@@ -1438,13 +1541,21 @@ final class HotkeyInputManager {
         return fillers.contains(normalized)
     }
 
-    private func startRecording() {
-        guard !isFinishing else { return }
+    @discardableResult
+    private func startRecording() -> Bool {
+        guard !isFinishing else { return false }
+        // 框选十字线进行中不开录音：避免收尾时向用户此刻看不见的目标合成粘贴。
+        // 必须上报而不是静默吞掉——"热键按下没反应"是本类修过一次的静默故障类
+        guard !isScreenshotInFlight else {
+            HotkeyFileLog.shared.log("rec: ignored (screenshot selection in progress)")
+            onStateChange?(.failure(message: "截图框选进行中，请先完成截图或按 Esc 取消"))
+            return false
+        }
         // 权限不满足时明确上报，不再静默返回（此前热键按下后"没反应"的根源之一）
         if let reason = SpeechManager.shared.permissionBlockedReason {
             HotkeyFileLog.shared.log("rec: blocked — \(reason)")
             onStateChange?(.permissionDenied(message: reason))
-            return
+            return false
         }
 
         let newSessionID = UUID()
@@ -1499,6 +1610,7 @@ final class HotkeyInputManager {
             guard let self, !Task.isCancelled, self.sessionID == newSessionID else { return }
             self.stop()
         }
+        return true
     }
 
     /// 录音中取消：丢弃录音，不转写、不粘贴、不计入统计
