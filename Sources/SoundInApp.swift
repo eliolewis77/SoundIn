@@ -641,7 +641,12 @@ private struct SettingsView: View {
                 Spacer()
                 shortcutCaptureButton(.screenshot, title: screenshotShortcut.displayText)
             }
-            Text("按下快捷键后拖拽框选，松开即复制到剪贴板，到目标应用 ⌘V 粘贴；Esc 取消。需要「屏幕录制」权限。默认 F1 在系统默认布局（F1 为亮度键）下按 fn+F1 触发。")
+            Toggle("截图后显示操作面板", isOn: Binding(
+                get: { HotkeyInputManager.shared.screenshotOCRPanelEnabled },
+                set: { HotkeyInputManager.shared.screenshotOCRPanelEnabled = $0 }
+            ))
+            .help("截图完成后在鼠标附近弹出「文字识别」操作面板，点击后在本地识别图中的文字（离线）。关闭后保持现状（仅复制到剪贴板）。默认开启。")
+            Text("按下快捷键后拖拽框选，松开即复制到剪贴板，到目标应用 ⌘V 粘贴；Esc 取消。需要「屏幕录制」权限。默认 F1 在系统默认布局（F1 为亮度键）下按 fn+F1 触发。开启操作面板后，可在弹出的小面板里一键识别图中文字（本地 OCR，离线）。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
         }

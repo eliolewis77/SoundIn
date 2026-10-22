@@ -222,6 +222,14 @@ final class HotkeyInputManager {
         }
     }
 
+    /// 截图完成后是否弹出 OCR 操作面板（本地 Vision 识别入口）。默认开启。
+    /// 默认 true 必须用 object(forKey:) 读取——bool(forKey:) 缺 key 时返回 false，
+    /// 会把默认值静默反转（VoiceInputHUD.isEnabled 同款坑）
+    var screenshotOCRPanelEnabled: Bool =
+        UserDefaults.standard.object(forKey: "voiceInputScreenshotOCRPanel") as? Bool ?? true {
+        didSet { UserDefaults.standard.set(screenshotOCRPanelEnabled, forKey: "voiceInputScreenshotOCRPanel") }
+    }
+
     // MARK: - 连击翻译触发设置
 
     /// 连击翻译的触发键（纯按键，不带修饰键）。默认 Shift。
@@ -1076,6 +1084,12 @@ final class HotkeyInputManager {
                 // 成功不弹提示（系统框选本身即反馈）；非 0 多为 Esc 取消，属常态操作，
                 // 弹失败提示会次次打扰——只记日志
                 HotkeyFileLog.shared.log("screenshot: finished exit=\(code)")
+                // 仅 exit 0（真截到图）且开关开：在鼠标附近弹 OCR 操作面板。
+                // 此刻剪贴板未必已写入（screencapture 先退进程后写板也可能），
+                // 但面板只在点击「文字识别」时才读板，无竞态
+                if code == 0, self?.screenshotOCRPanelEnabled == true {
+                    ScreenshotOCRPanel.shared.presentActionPanel(near: NSEvent.mouseLocation)
+                }
             }
         }
         do {
