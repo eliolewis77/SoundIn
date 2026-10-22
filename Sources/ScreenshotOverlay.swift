@@ -2,16 +2,42 @@ import AppKit
 import Carbon.HIToolbox
 import ImageIO
 import SwiftUI
+import UniformTypeIdentifiers
 
 // MARK: - 自建截图选区遮罩
 // 触发 → screencapture -x 静默抓冻结帧 → 全屏遮罩（压暗 + 冻结帧 + 白色十字光标）
-// → 拖拽选区（高亮 + 实时尺寸）→ 松手弹就地工具栏（文字识别 / 复制 / 保存到桌面）。
+// → 拖拽选区（高亮 + 实时尺寸）→ 松手弹就地工具栏（文字识别 / 画笔 / 矩形 / 马赛克 /
+// 撤销 / 复制 / 保存到桌面），标注烘焙进复制与保存的输出图（OCR 用无标注干净图）。
 // 一期只做鼠标所在屏；直接替换 screencapture -i 系统 UI。
 // 生命周期：idle → snapshotting → selecting → toolbar → idle。
-// Swift 6：CGImage 非 Sendable，全程 MainActor 创建与消费；Process.terminationHandler
-// 里只把 Sendable（exit code、路径）送进 Task { @MainActor }。
-// Esc 走临时 Carbon 热键 id=5——Secure Event Input 下 NSEvent 全局监听收不到 keyDown
-// （见 HotkeyInputManager 录音 Esc id=4 的同类结论），Carbon 通道不受影响。
+// Swift 6：CGImage 非 Sendable，全程 MainActor 创建与消费（跨线程用 SendableCGImage 装箱）；
+// Process.terminationHandler 里只把 Sendable（exit code、路径）送进 Task { @MainActor }。
+// Esc 走临时 Carbon 热键 id=5、标注撤销走 ⌘Z id=6——Secure Event Input 下 NSEvent
+// 全局监听收不到 keyDown（见 HotkeyInputManager 录音 Esc id=4 的同类结论），Carbon 不受影响。
+
+/// 标注工具。工具栏按钮与 activeTool 的取值
+enum AnnotationTool {
+    case pen, rect, mosaic
+}
+
+/// 一个已提交/绘制中的标注操作。rect/mosaic 用 rect，pen 用 points。
+/// colorIndex 指向 ScreenshotOverlay.annotationPalette——笔迹保留绘制时的颜色，
+/// 换色不回溯影响历史笔迹
+struct Annotation {
+    enum Kind { case pen, rect, mosaic }
+    var kind: Kind
+    var points: [NSPoint] = []
+    var rect: NSRect = .zero
+    var colorIndex: Int = 0
+}
+
+/// 渲染状态快照：overlay 是唯一事实源，视图 draw 时经 provider 读取（与 selectionProvider 同模式）
+struct AnnotationRenderState {
+    var committed: [Annotation]
+    var drawing: Annotation?
+    var pixelated: CGImage?
+    var palette: [NSColor]
+}
 
 @MainActor
 final class ScreenshotOverlay {
@@ -36,9 +62,20 @@ final class ScreenshotOverlay {
     private var snapshotProcess: Process?
     private var watchdogTask: Task<Void, Never>?
     private var escHotKeyRef: EventHotKeyRef?
+    private var undoHotKeyRef: EventHotKeyRef?
     private var overlayPanel: NSPanel?
     private var overlayView: OverlayContentView?
     private var toolbarPanel: NSPanel?
+    // 标注状态（会话内，dismiss 全清）
+    private var annotations: [Annotation] = []
+    private var activeTool: AnnotationTool?
+    private var drawingAnnotation: Annotation?
+    private var drawingStart: NSPoint?
+    /// 当前笔迹色的色板下标（笔迹类标注用；历史笔迹保留各自颜色）
+    private var annotationColorIndex = 0
+    /// 整帧缩小版（马赛克源图），首次使用马赛克时惰性生成
+    private var pixelatedImage: CGImage?
+    private var toolbarModel: ToolbarModel?
 
     // MARK: - 常量
 
@@ -47,6 +84,14 @@ final class ScreenshotOverlay {
     /// 选区宽或高小于此值视为单击（取消），不进工具栏
     static let minSelectionSide: CGFloat = 4
     static let dimAlpha: CGFloat = 0.28
+    /// 标注线宽（逻辑点）
+    static let annotationLineWidth: CGFloat = 3
+    /// 马赛克块边长（逻辑点）：跨分辨率视觉一致
+    static let mosaicBlockPoint: CGFloat = 12
+    /// 标注色板：默认主题蓝，其余为高频标注色
+    static let annotationPalette: [NSColor] = [.controlAccentColor, .systemRed, .systemYellow, .systemGreen]
+    /// ⌥ 保存面板记住的上次目录（无沙盒，直接存路径）
+    private static let lastSaveDirKey = "screenshot.lastSaveDir"
 
     // MARK: - 生命周期
 
@@ -58,6 +103,14 @@ final class ScreenshotOverlay {
         phase = .snapshotting
         selectionRect = .zero
         dragStart = nil
+        annotations = []
+        activeTool = nil
+        drawingAnnotation = nil
+        drawingStart = nil
+        pixelatedImage = nil
+        annotationColorIndex = 0
+        unregisterUndoHotKey()
+        toolbarModel = nil
         let mouse = NSEvent.mouseLocation
         targetScreen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
         let cursor = Self.crosshairCursor
@@ -90,12 +143,20 @@ final class ScreenshotOverlay {
         watchdogTask?.cancel()
         watchdogTask = nil
         unregisterEscHotKey()
+        unregisterUndoHotKey()
         toolbarPanel?.orderOut(nil)
         overlayPanel?.orderOut(nil)
         NSCursor.pop()
         // 冻结帧是整屏解码位图（5K 屏 ~56MB），会话结束必须释放，不能等下次覆盖
         snapshotImage = nil
+        pixelatedImage = nil
         overlayView?.clearContent()
+        annotations = []
+        activeTool = nil
+        drawingAnnotation = nil
+        drawingStart = nil
+        annotationColorIndex = 0
+        toolbarModel = nil
         selectionRect = .zero
         dragStart = nil
         phase = .idle
@@ -189,6 +250,19 @@ final class ScreenshotOverlay {
             dimAlpha: Self.dimAlpha,
             selectionProvider: { [weak self] in self?.selectionRect ?? .zero },
             pixelRectProvider: { [weak self] in self?.pixelRect(for: $0) },
+            annotationState: { [weak self] in
+                guard let self, !self.annotations.isEmpty || self.drawingAnnotation != nil else { return nil }
+                // 马赛克标注在场才生成/保留像素化帧（惰性）
+                let needsMosaic = self.annotations.contains { $0.kind == .mosaic }
+                    || (self.drawingAnnotation?.kind == .mosaic)
+                if needsMosaic { self.pixelatedFrameIfNeeded() }
+                return AnnotationRenderState(
+                    committed: self.annotations,
+                    drawing: self.drawingAnnotation,
+                    pixelated: self.pixelatedImage,
+                    palette: Self.annotationPalette
+                )
+            },
             onMouseDown: { [weak self] in self?.handleMouseDown($0) },
             onMouseDragged: { [weak self] in self?.handleMouseDragged($0) },
             onMouseUp: { [weak self] in self?.handleMouseUp($0) },
@@ -197,7 +271,7 @@ final class ScreenshotOverlay {
         overlayView = view
         panel.contentView = view
         panel.setFrame(screen.frame, display: false)
-        // key window 才有稳定的指针控制权；非激活面板 makeKey 不抢应用焦点
+        // 非激活面板 makeKey 不抢应用焦点，但能让点击/拖拽事件稳定送达遮罩
         panel.makeKeyAndOrderFront(nil)
         // 复用的视图 + 未变的 frame 不会触发重绘，图层会残留上一会话的选区帧——强制全量重绘
         view.needsDisplay = true
@@ -211,8 +285,15 @@ final class ScreenshotOverlay {
     // MARK: - 鼠标（由 OverlayContentView 回调，视图局部坐标）
 
     private func handleMouseDown(_ p: NSPoint) {
-        // 工具栏期点击选区/遮罩空白 = 放弃当前选区整体退出（微信式）
+        // 工具栏期：激活了标注工具且点击在选区内 → 绘制；
+        // 无激活工具时点击选区/遮罩空白 = 放弃当前选区整体退出（微信式）
         if phase == .toolbar {
+            if let tool = activeTool {
+                // 工具激活期选区外点击忽略：防手一滑丢掉整个会话的标注（无工具时保留微信式取消）
+                guard selectionRect.contains(p) else { return }
+                beginAnnotation(tool, at: p)
+                return
+            }
             cancel()
             return
         }
@@ -224,6 +305,11 @@ final class ScreenshotOverlay {
     }
 
     private func handleMouseDragged(_ p: NSPoint) {
+        // 工具栏期的拖拽是标注绘制（无绘制中标注则 no-op）
+        if phase == .toolbar {
+            updateAnnotation(at: p)
+            return
+        }
         guard phase == .selecting, let start = dragStart, let view = overlayView else { return }
         let bounds = view.bounds
         let old = selectionRect
@@ -244,6 +330,11 @@ final class ScreenshotOverlay {
     }
 
     private func handleMouseUp(_ p: NSPoint) {
+        // 工具栏期的松手是标注落库
+        if phase == .toolbar {
+            finishAnnotation(at: p)
+            return
+        }
         guard phase == .selecting else { return }
         handleMouseDragged(p)
         HotkeyFileLog.shared.log("overlay: mouseUp sel=\(selectionRect)")
@@ -260,11 +351,17 @@ final class ScreenshotOverlay {
 
     private func enterToolbarPhase() {
         phase = .toolbar
+        let model = ToolbarModel()
+        toolbarModel = model
         let panel = ensureToolbarPanel()
         let view = ToolbarView(
+            model: model,
             onOCR: { [weak self] in self?.runOCR() },
             onCopy: { [weak self] in self?.copyToPasteboard() },
-            onSave: { [weak self] in self?.saveToDesktop() }
+            onSave: { [weak self] in self?.saveToDesktop() },
+            onToggleTool: { [weak self] in self?.toggleTool($0) },
+            onUndo: { [weak self] in self?.undoLastAnnotation() },
+            onSetColor: { [weak self] in self?.setAnnotationColor($0) }
         )
         panel.contentView = NSHostingView(rootView: AnyView(view))
         panel.orderFrontRegardless()
@@ -310,6 +407,138 @@ final class ScreenshotOverlay {
         panel.setFrame(NSRect(origin: NSPoint(x: x, y: y), size: size), display: false)
     }
 
+    // MARK: - 标注
+
+    private func toggleTool(_ tool: AnnotationTool) {
+        activeTool = (activeTool == tool) ? nil : tool
+        drawingAnnotation = nil
+        toolbarModel?.activeTool = activeTool
+        // 激活笔迹类工具时色板展开/收起会改变工具栏宽度，重新测量摆放
+        placeToolbar()
+        HotkeyFileLog.shared.log("overlay: tool \(activeTool.map { "\($0)" } ?? "none")")
+    }
+
+    /// 选色只影响后续笔迹（历史笔迹保留各自颜色），布局不变无需重摆
+    private func setAnnotationColor(_ index: Int) {
+        guard Self.annotationPalette.indices.contains(index) else { return }
+        annotationColorIndex = index
+        toolbarModel?.colorIndex = index
+        overlayView?.setNeedsDisplay(selectionRect.insetBy(dx: -6, dy: -6))
+    }
+
+    private func beginAnnotation(_ tool: AnnotationTool, at rawPoint: NSPoint) {
+        let p = clampedToSelection(rawPoint)
+        drawingStart = p
+        switch tool {
+        case .pen: drawingAnnotation = Annotation(kind: .pen, points: [p], colorIndex: annotationColorIndex)
+        case .rect: drawingAnnotation = Annotation(kind: .rect, rect: NSRect(origin: p, size: .zero), colorIndex: annotationColorIndex)
+        case .mosaic: drawingAnnotation = Annotation(kind: .mosaic, rect: NSRect(origin: p, size: .zero))
+        }
+    }
+
+    private func updateAnnotation(at rawPoint: NSPoint) {
+        guard var drawing = drawingAnnotation, drawingStart != nil else { return }
+        let p = clampedToSelection(rawPoint)
+        let old = annotationBounds(drawing)
+        switch drawing.kind {
+        case .pen:
+            // 距上点 <1.5pt 跳过：防长笔画聚出万点数组
+            if let last = drawing.points.last, hypot(p.x - last.x, p.y - last.y) < 1.5 { return }
+            drawing.points.append(p)
+        case .rect, .mosaic:
+            guard let start = drawingStart else { return }
+            drawing.rect = NSRect(x: min(start.x, p.x), y: min(start.y, p.y),
+                                  width: abs(p.x - start.x), height: abs(p.y - start.y))
+        }
+        drawingAnnotation = drawing
+        invalidateAnnotationChange(oldB: old, newB: annotationBounds(drawing))
+    }
+
+    private func finishAnnotation(at rawPoint: NSPoint) {
+        guard var drawing = drawingAnnotation else { return }
+        let p = clampedToSelection(rawPoint)
+        switch drawing.kind {
+        case .pen:
+            // 单击（无拖拽）也是合法标注：渲染为圆点
+            if let last = drawing.points.last, hypot(p.x - last.x, p.y - last.y) >= 1.5 {
+                drawing.points.append(p)
+            }
+        case .rect, .mosaic:
+            // drawingStart 由 beginAnnotation 必设；兜底只为免解包，退化矩形会被下方尺寸检查丢弃
+            let start = drawingStart ?? p
+            drawing.rect = NSRect(x: min(start.x, p.x), y: min(start.y, p.y),
+                                  width: abs(p.x - start.x), height: abs(p.y - start.y))
+            // 过小视为误触，丢弃
+            guard drawing.rect.width >= 2, drawing.rect.height >= 2 else {
+                drawingAnnotation = nil
+                return
+            }
+        }
+        annotations.append(drawing)
+        drawingAnnotation = nil
+        // 懒注册：首次有标注可撤才接管 ⌘Z（Carbon 全局热键吞键不透传，
+        // 空窗期吞前台应用的撤销键是最差语义）；撤空即注销
+        if annotations.count == 1 { registerUndoHotKey() }
+        toolbarModel?.canUndo = true
+        overlayView?.setNeedsDisplay(selectionRect.insetBy(dx: -6, dy: -6))
+        HotkeyFileLog.shared.log("overlay: annotation committed (\(drawing.kind))")
+    }
+
+    private func undoLastAnnotation() {
+        guard !annotations.isEmpty else { return }
+        annotations.removeLast()
+        if annotations.isEmpty {
+            unregisterUndoHotKey()
+            toolbarModel?.canUndo = false
+        }
+        overlayView?.setNeedsDisplay(selectionRect.insetBy(dx: -6, dy: -6))
+        HotkeyFileLog.shared.log("overlay: annotation undone, left=\(annotations.count)")
+    }
+
+    private func annotationBounds(_ a: Annotation) -> NSRect {
+        switch a.kind {
+        case .pen:
+            guard let first = a.points.first else { return .zero }
+            var r = NSRect(origin: first, size: .zero)
+            for p in a.points.dropFirst() { r = r.union(NSRect(origin: p, size: .zero)) }
+            return r
+        case .rect, .mosaic:
+            return a.rect
+        }
+    }
+
+    /// 标注失效区：新旧 bbox 并集外扩后夹回选区（标注被 clip 在选区内，勿扩出去）
+    private func invalidateAnnotationChange(oldB: NSRect, newB: NSRect) {
+        guard let view = overlayView else { return }
+        let dirty = oldB.union(newB).insetBy(dx: -6, dy: -6)
+            .intersection(selectionRect.insetBy(dx: -8, dy: -8))
+            .intersection(view.bounds)
+        view.setNeedsDisplay(dirty)
+    }
+
+    private func clampedToSelection(_ p: NSPoint) -> NSPoint {
+        NSPoint(x: min(max(p.x, selectionRect.minX), selectionRect.maxX),
+                y: min(max(p.y, selectionRect.minY), selectionRect.maxY))
+    }
+
+    /// 整帧缩小版（马赛克源图），首次需要时惰性生成。
+    /// 缩小用 .high（盒式均值），绘制/烘焙时 .none 最近邻放大 → 硬边马赛克块
+    private func pixelatedFrameIfNeeded() {
+        guard pixelatedImage == nil, let image = snapshotImage else { return }
+        let factor = max(2, Int((pixelScale * Self.mosaicBlockPoint).rounded()))
+        let w = max(1, image.width / factor)
+        let h = max(1, image.height / factor)
+        guard let ctx = CGContext(
+            data: nil, width: w, height: h,
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: image.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return }
+        ctx.interpolationQuality = .high
+        ctx.draw(image, in: CGRect(x: 0, y: 0, width: w, height: h))
+        pixelatedImage = ctx.makeImage()
+    }
+
     // MARK: - 工具栏动作
 
     /// 选区（视图局部，左下原点）→ 冻结帧像素矩形（左上原点）：唯一实现，
@@ -332,7 +561,39 @@ final class ScreenshotOverlay {
         return snapshotImage?.cropping(to: pixelRect)
     }
 
+    /// 带标注的选区图：裁剪干净图 + 重放标注。无标注零成本走干净图老路。
+    /// 坐标变换（已验证）：视图点 v → (scale·v.x − P.minX, scale·v.y + P.maxY − scale·viewH)，
+    /// 其中 P 为 integral 后的像素裁剪框——用 sel 原点推导会有 ±1px 漂移
+    private func annotatedSelectionImage() -> CGImage? {
+        guard !annotations.isEmpty else { return croppedSelectionImage() }
+        guard let clean = croppedSelectionImage(),
+              let pixelP = pixelRect(for: selectionRect),
+              let view = overlayView, let frame = snapshotImage else { return nil }
+        guard let ctx = CGContext(
+            data: nil,
+            width: Int(pixelP.width), height: Int(pixelP.height),
+            bitsPerComponent: 8, bytesPerRow: 0,
+            space: frame.colorSpace ?? CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+        ) else { return nil }
+        ctx.draw(clean, in: CGRect(x: 0, y: 0, width: pixelP.width, height: pixelP.height))
+        ctx.translateBy(x: -pixelP.minX, y: pixelP.maxY - pixelScale * view.bounds.height)
+        ctx.scaleBy(x: pixelScale, y: pixelScale)
+        let needsMosaic = annotations.contains { $0.kind == .mosaic }
+        var pixelated: CGImage?
+        if needsMosaic {
+            pixelatedFrameIfNeeded()
+            pixelated = pixelatedImage
+        }
+        for a in annotations {
+            renderAnnotation(a, in: ctx, pixelated: pixelated,
+                             viewBounds: view.bounds.size, palette: Self.annotationPalette)
+        }
+        return ctx.makeImage()
+    }
+
     private func runOCR() {
+        // OCR 用无标注干净图：识别用户画的框没有意义，反而干扰识别
         guard phase == .toolbar, let cgImage = croppedSelectionImage() else { dismiss(); return }
         let anchor = globalSelectionCenter()
         dismiss()
@@ -341,7 +602,8 @@ final class ScreenshotOverlay {
     }
 
     private func copyToPasteboard() {
-        guard phase == .toolbar, let cgImage = croppedSelectionImage() else { dismiss(); return }
+        // 复制/保存带标注（烘焙失败兜底干净图，不因标注丢功能）
+        guard phase == .toolbar, let cgImage = annotatedSelectionImage() ?? croppedSelectionImage() else { dismiss(); return }
         let rep = NSBitmapImageRep(cgImage: cgImage)
         guard let tiff = rep.tiffRepresentation else {
             dismiss()
@@ -355,11 +617,34 @@ final class ScreenshotOverlay {
     }
 
     private func saveToDesktop() {
-        guard phase == .toolbar, let cgImage = croppedSelectionImage() else { dismiss(); return }
+        guard phase == .toolbar, let cgImage = annotatedSelectionImage() ?? croppedSelectionImage() else { dismiss(); return }
         let image = SendableCGImage(cgImage: cgImage)
         let anchor = globalSelectionCenter()
-        // 先收遮罩再后台编码写盘：PNG 压缩大图要 ~1s，不能让工具栏和整个应用冻结等待
+        // 先收遮罩再做后续动作：PNG 编码大图要 ~1s，不能让工具栏和整个应用冻结等待；
+        // Esc/⌘Z 热键随 dismiss 注销，保存面板里按键只作用于面板本身
         dismiss()
+        if NSEvent.modifierFlags.contains(.option) {
+            presentSavePanel(image: image, anchor: anchor)
+        } else {
+            writeScreenshotInBackground(image, destination: nil, anchor: anchor)
+        }
+    }
+
+    /// ⌥ 保存：NSSavePanel 自选位置并记住目录；取消则静默结束不写盘。
+    /// 同步 runModal 是 macOS 标准保存交互
+    private func presentSavePanel(image: SendableCGImage, anchor: NSPoint) {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.png]
+        panel.nameFieldStringValue = "截屏 " + Self.timestampString()
+        panel.directoryURL = UserDefaults.standard.url(forKey: Self.lastSaveDirKey)
+            ?? FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        UserDefaults.standard.set(url.deletingLastPathComponent(), forKey: Self.lastSaveDirKey)
+        writeScreenshotInBackground(image, destination: url, anchor: anchor)
+    }
+
+    /// 编码 + 写盘全部后台：destination 为 nil 走默认路径（桌面 + 时间戳 + 防重名）
+    private func writeScreenshotInBackground(_ image: SendableCGImage, destination: URL?, anchor: NSPoint) {
         Task.detached(priority: .userInitiated) {
             // ImageIO 编码线程安全且快于 NSBitmapImageRep；失败兜底走浮窗（标题「截图」）
             let data = NSMutableData()
@@ -372,30 +657,40 @@ final class ScreenshotOverlay {
                 await MainActor.run { ScreenshotOCRPanel.shared.presentFailure("PNG 编码失败", near: anchor, title: "截图") }
                 return
             }
-            guard let dir = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first else {
-                await MainActor.run { ScreenshotOCRPanel.shared.presentFailure("找不到桌面目录", near: anchor, title: "截图") }
-                return
-            }
-            // en_US_POSIX 防用户历法（佛历等）把日期打飞
-            let formatter = DateFormatter()
-            formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
-            formatter.locale = Locale(identifier: "en_US_POSIX")
-            let base = "截屏 " + formatter.string(from: Date())
-            var url = dir.appendingPathComponent(base + ".png")
-            var n = 2
-            while FileManager.default.fileExists(atPath: url.path) {
-                url = dir.appendingPathComponent("\(base)-\(n).png")
-                n += 1
+            let target: URL
+            if let destination {
+                target = destination
+            } else {
+                guard let dir = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first else {
+                    await MainActor.run { ScreenshotOCRPanel.shared.presentFailure("找不到桌面目录", near: anchor, title: "截图") }
+                    return
+                }
+                let base = "截屏 " + Self.timestampString()
+                var url = dir.appendingPathComponent(base + ".png")
+                var n = 2
+                while FileManager.default.fileExists(atPath: url.path) {
+                    url = dir.appendingPathComponent("\(base)-\(n).png")
+                    n += 1
+                }
+                target = url
             }
             do {
-                try (data as Data).write(to: url, options: .atomic)
-                HotkeyFileLog.shared.log("overlay: saved \(url.path)")
+                try (data as Data).write(to: target, options: .atomic)
+                HotkeyFileLog.shared.log("overlay: saved \(target.path)")
             } catch {
                 await MainActor.run {
                     ScreenshotOCRPanel.shared.presentFailure("保存失败：\(error.localizedDescription)", near: anchor, title: "截图")
                 }
             }
         }
+    }
+
+    /// en_US_POSIX 防用户历法（佛历等）把日期打飞。nonisolated：后台写盘任务也用
+    private nonisolated static func timestampString() -> String {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd HH.mm.ss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter.string(from: Date())
     }
 
     private func globalSelectionCenter() -> NSPoint {
@@ -427,6 +722,35 @@ final class ScreenshotOverlay {
     private func unregisterEscHotKey() {
         if let ref = escHotKeyRef { UnregisterEventHotKey(ref) }
         escHotKeyRef = nil
+    }
+
+    // MARK: - ⌘Z 撤销（临时 Carbon 热键 id=6，懒注册）
+
+    private func registerUndoHotKey() {
+        guard undoHotKeyRef == nil else { return }
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(
+            UInt32(kVK_ANSI_Z), UInt32(cmdKey),
+            EventHotKeyID(signature: OSType(0x5653484B), id: 6),
+            GetApplicationEventTarget(),
+            0,
+            &ref
+        )
+        // 失败（⌘Z 被其他进程占用，极罕见）只记日志：工具栏撤销按钮仍可用
+        if status == noErr { undoHotKeyRef = ref }
+        HotkeyFileLog.shared.log("overlay: cmd-z hotkey register status=\(status)")
+    }
+
+    private func unregisterUndoHotKey() {
+        if let ref = undoHotKeyRef { UnregisterEventHotKey(ref) }
+        undoHotKeyRef = nil
+    }
+
+    /// Carbon ⌘Z（id=6）派发入口。绘制中忽略，防「撤上一笔的同时正画新一笔」的状态交错
+    func handleUndoHotKey() {
+        guard phase == .toolbar, !annotations.isEmpty, drawingAnnotation == nil else { return }
+        HotkeyFileLog.shared.log("overlay: undo (hotkey)")
+        undoLastAnnotation()
     }
 
     // MARK: - 窗口
@@ -502,6 +826,49 @@ private final class OverlayPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
+/// 标注渲染：视图实时预览与复制/保存的烘焙共用同一实现（全走 CGContext，
+/// 两处上下文同源）。坐标系为遮罩视图局部坐标（左下原点）。仅 MainActor 调用
+@MainActor
+private func renderAnnotation(_ annotation: Annotation, in ctx: CGContext,
+                              pixelated: CGImage?, viewBounds: NSSize, palette: [NSColor]) {
+    let width = ScreenshotOverlay.annotationLineWidth
+    // 每笔用自己的色号（换色不回溯历史笔迹）
+    let strokeColor = palette[annotation.colorIndex % max(palette.count, 1)]
+        .usingColorSpace(.deviceRGB)?.cgColor ?? CGColor(gray: 0, alpha: 1)
+    switch annotation.kind {
+    case .pen:
+        let points = annotation.points
+        guard !points.isEmpty else { return }
+        if points.count == 1, let p = points.first {
+            // 单击成点：零长路径 stroke 不出来，画实心圆
+            ctx.setFillColor(strokeColor)
+            ctx.fillEllipse(in: CGRect(x: p.x - width / 2, y: p.y - width / 2, width: width, height: width))
+            return
+        }
+        let path = CGMutablePath()
+        path.move(to: points[0])
+        for p in points.dropFirst() { path.addLine(to: p) }
+        ctx.setStrokeColor(strokeColor)
+        ctx.setLineWidth(width)
+        ctx.setLineCap(.round)
+        ctx.setLineJoin(.round)
+        ctx.addPath(path)
+        ctx.strokePath()
+    case .rect:
+        ctx.setStrokeColor(strokeColor)
+        ctx.setLineWidth(width)
+        ctx.stroke(annotation.rect)
+    case .mosaic:
+        guard let pixelated else { return }
+        ctx.saveGState()
+        ctx.clip(to: annotation.rect)
+        // 最近邻放大 → 硬边马赛克块
+        ctx.interpolationQuality = .none
+        ctx.draw(pixelated, in: NSRect(origin: .zero, size: viewBounds))
+        ctx.restoreGState()
+    }
+}
+
 // MARK: - 遮罩内容视图（NSView 自绘：冻结帧 + 压暗 + 选区高亮 + 尺寸提示）
 
 private final class OverlayContentView: NSView {
@@ -512,6 +879,8 @@ private final class OverlayContentView: NSView {
     private var selectionProvider: (() -> NSRect)?
     /// 选区 → 冻结帧像素矩形，同样由 overlay 注入唯一实现
     private var pixelRectProvider: ((NSRect) -> CGRect?)?
+    /// 标注渲染状态（committed + 绘制中 + 马赛克帧 + 颜色），无标注时返回 nil 跳过绘制
+    private var annotationStateProvider: (() -> AnnotationRenderState?)?
     private var onMouseDown: ((NSPoint) -> Void)?
     private var onMouseDragged: ((NSPoint) -> Void)?
     private var onMouseUp: ((NSPoint) -> Void)?
@@ -520,6 +889,7 @@ private final class OverlayContentView: NSView {
     func configure(snapshotImage: CGImage, pixelScale: CGFloat, dimAlpha: CGFloat,
                    selectionProvider: @escaping () -> NSRect,
                    pixelRectProvider: @escaping (NSRect) -> CGRect?,
+                   annotationState: @escaping () -> AnnotationRenderState?,
                    onMouseDown: @escaping (NSPoint) -> Void,
                    onMouseDragged: @escaping (NSPoint) -> Void,
                    onMouseUp: @escaping (NSPoint) -> Void,
@@ -529,6 +899,7 @@ private final class OverlayContentView: NSView {
         self.dimAlpha = dimAlpha
         self.selectionProvider = selectionProvider
         self.pixelRectProvider = pixelRectProvider
+        self.annotationStateProvider = annotationState
         self.onMouseDown = onMouseDown
         self.onMouseDragged = onMouseDragged
         self.onMouseUp = onMouseUp
@@ -562,6 +933,20 @@ private final class OverlayContentView: NSView {
         bounds.fill()
         if !sel.isEmpty, let px = pixelRectProvider?(sel), let cropped = image.cropping(to: px) {
             ctx.draw(cropped, in: sel)
+        }
+        // ③½ 标注：clip 在选区内、主题色绘制（边框压在其上，保持选区框清晰）
+        if !sel.isEmpty, let state = annotationStateProvider?() {
+            ctx.saveGState()
+            ctx.clip(to: sel)
+            for a in state.committed {
+                renderAnnotation(a, in: ctx, pixelated: state.pixelated,
+                                 viewBounds: bounds.size, palette: state.palette)
+            }
+            if let d = state.drawing {
+                renderAnnotation(d, in: ctx, pixelated: state.pixelated,
+                                 viewBounds: bounds.size, palette: state.palette)
+            }
+            ctx.restoreGState()
         }
         // ④ 选区边框：主题蓝 1.5pt + 外圈暗描边
         if !sel.isEmpty {
@@ -640,18 +1025,60 @@ private final class OverlayContentView: NSView {
 
 // MARK: - 选区工具栏
 
+/// 工具栏按钮态。@Observable 原地更新（无闪烁、无 fittingSize 重测竞态）；
+/// overlay 自身字段仍是唯一事实源，model 只是视图投影
+@MainActor
+@Observable
+private final class ToolbarModel {
+    var activeTool: AnnotationTool?
+    var canUndo = false
+    var colorIndex = 0
+}
+
 private struct ToolbarView: View {
+    let model: ToolbarModel
     let onOCR: () -> Void
     let onCopy: () -> Void
     let onSave: () -> Void
+    let onToggleTool: (AnnotationTool) -> Void
+    let onUndo: () -> Void
+    let onSetColor: (Int) -> Void
+
+    /// 笔迹类工具激活时展开色板（马赛克无颜色概念）
+    private var showsColorSwatches: Bool {
+        model.activeTool == .pen || model.activeTool == .rect
+    }
 
     var body: some View {
         HStack(spacing: 2) {
+            toolButton("画笔", systemImage: "pencil.tip", tool: .pen)
+            toolButton("矩形", systemImage: "rectangle", tool: .rect)
+            toolButton("马赛克", systemImage: "square.grid.3x3", tool: .mosaic)
+            if showsColorSwatches {
+                Divider().frame(height: 16)
+                ForEach(ScreenshotOverlay.annotationPalette.indices, id: \.self) { index in
+                    swatch(index: index)
+                }
+            }
+            Divider().frame(height: 16)
+            Button(action: onUndo) {
+                Image(systemName: "arrow.uturn.backward")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(model.canUndo ? .primary : .tertiary)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 5)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .disabled(!model.canUndo)
+            .help("撤销标注（⌘Z）")
+            Divider().frame(height: 16)
             button("文字识别", systemImage: "text.viewfinder", action: onOCR)
             Divider().frame(height: 16)
             button("复制", systemImage: "doc.on.doc", action: onCopy)
             Divider().frame(height: 16)
-            button("保存", systemImage: "square.and.arrow.down", action: onSave)
+            button("保存", systemImage: "square.and.arrow.down", action: onSave,
+                   help: "保存到桌面（按住 ⌥ 点击可选择位置）")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -666,7 +1093,7 @@ private struct ToolbarView: View {
         )
     }
 
-    private func button(_ title: String, systemImage: String, action: @escaping () -> Void) -> some View {
+    private func button(_ title: String, systemImage: String, action: @escaping () -> Void, help: String? = nil) -> some View {
         Button(action: action) {
             Label(title, systemImage: systemImage)
                 .font(.system(size: 12, weight: .medium))
@@ -675,5 +1102,52 @@ private struct ToolbarView: View {
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+        .help(help ?? title)
+    }
+
+    /// 色板圆点：选中态白圈 + 深色外圈双环，压暗底和亮底都可见
+    private func swatch(index: Int) -> some View {
+        let color = ScreenshotOverlay.annotationPalette[index]
+        let selected = model.colorIndex == index
+        return Button {
+            onSetColor(index)
+        } label: {
+            Circle()
+                .fill(Color(nsColor: color))
+                .frame(width: 12, height: 12)
+                .overlay {
+                    if selected {
+                        Circle().strokeBorder(Color.white, lineWidth: 1.5)
+                        Circle().strokeBorder(Color.primary.opacity(0.55), lineWidth: 1)
+                    }
+                }
+                .padding(2)
+                .contentShape(Circle())
+        }
+        .buttonStyle(.plain)
+        .help("标注颜色")
+    }
+
+    /// 标注工具按钮：图标态，激活时 accent 圆角底 + 白图标
+    private func toolButton(_ title: String, systemImage: String, tool: AnnotationTool) -> some View {
+        let active = model.activeTool == tool
+        return Button {
+            onToggleTool(tool)
+        } label: {
+            Image(systemName: systemImage)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(active ? Color.white : Color.primary)
+                .padding(.horizontal, 7)
+                .padding(.vertical, 5)
+                .background {
+                    if active {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.accentColor)
+                    }
+                }
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(title)
     }
 }

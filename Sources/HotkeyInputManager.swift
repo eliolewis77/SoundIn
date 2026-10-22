@@ -879,6 +879,16 @@ final class HotkeyInputManager {
                     return noErr
                 }
 
+                // id=6 → 截图工具栏期的 ⌘Z 撤销标注（同 id=5：独立于可配置触发键，忽略 release）
+                if keyCode.id == 6 {
+                    if GetEventKind(event) != UInt32(kEventHotKeyReleased) {
+                        Task { @MainActor in
+                            ScreenshotOverlay.shared.handleUndoHotKey()
+                        }
+                    }
+                    return noErr
+                }
+
                 // id=1 → 单击触发；id=2 → 长按触发；id=3 → 框选截图；id=4 → 录音中的 Esc 取消
                 let kind: TriggerKind
                 switch keyCode.id {
