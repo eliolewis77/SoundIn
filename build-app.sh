@@ -16,6 +16,37 @@ swift build -c release --disable-sandbox \
 cp ".build/release/SoundIn" "$MACOS/SoundIn"
 cp Info.plist "$CONTENTS/Info.plist"
 cp Resources/AppIcon.icns "$CONTENTS/Resources/AppIcon.icns"
+# .icon 是源文件，必须用 Xcode 26+ 的 actool 编译为 Assets.car。
+# 直接复制目录不会启用分层图标，Tahoe 会继续给旧 icns 添加兼容底板。
+if [ -d Resources/AppIcon.icon ]; then
+  ICON_BUILD_DIR="$PWD/.build-cache/icon-compile"
+  mkdir -p "$ICON_BUILD_DIR"
+  MIN_MACOS=$(/usr/libexec/PlistBuddy -c 'Print :LSMinimumSystemVersion' Info.plist)
+  xcrun actool Resources/AppIcon.icon \
+    --compile "$ICON_BUILD_DIR" \
+    --platform macosx \
+    --minimum-deployment-target "$MIN_MACOS" \
+    --app-icon AppIcon \
+    --output-partial-info-plist "$ICON_BUILD_DIR/Info.plist" \
+    --output-format human-readable-text --warnings --notices
+  cp "$ICON_BUILD_DIR/Assets.car" "$CONTENTS/Resources/Assets.car"
+  python3 - "$CONTENTS/Info.plist" "$ICON_BUILD_DIR/Info.plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as f:
+    info = plistlib.load(f)
+with open(sys.argv[2], "rb") as f:
+    info.update(plistlib.load(f))
+with open(sys.argv[1], "wb") as f:
+    plistlib.dump(info, f, sort_keys=False)
+PY
+else
+  # 避免增量打包时残留上次编译的新格式图标。
+  rm -f "$CONTENTS/Resources/Assets.car"
+fi
+# 清理旧打包流程复制的源目录；旧系统继续使用上面的原始 icns。
+rm -rf "$CONTENTS/Resources/AppIcon.icon"
 
 # Sparkle 以 SPM 二进制 target 形式链接，产物在 .build/release/Sparkle.framework。
 # 必须手动拷进 Contents/Frameworks/ 并补 rpath，否则启动即崩：

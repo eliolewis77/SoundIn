@@ -12,7 +12,7 @@ Thanks for your interest in SoundIn. This is a small personal project, but contr
 
 ## Development
 
-- Requires macOS 15+ and the Swift 6.0 toolchain.
+- Requires macOS 15+ and Xcode 26+ to compile the Icon Composer app icon.
 - Build with `./build-app.sh`, then run `.build-cache/app/SoundIn.app`.
 - Signing identity resolution order: the `SIGN_IDENTITY` environment variable → an auto-detected local **Apple Development** certificate → ad-hoc (`-`) as fallback. A stable certificate keeps macOS TCC permissions (microphone, accessibility) valid across rebuilds; ad-hoc signing invalidates them on every build.
 

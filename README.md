@@ -39,7 +39,7 @@ A minimal menu-bar dictation & translation app for macOS. Hold a hotkey to dicta
 ## Requirements
 
 - macOS 15.0+
-- Swift 6.0 工具链（Xcode Command Line Tools）
+- Xcode 26 或更新版本（打包时需要 `actool` 编译 Icon Composer 图标；仅 Command Line Tools 不够）
 - 一个 Whisper 类 API 端点（OpenAI、本地 Whisper 服务或任何兼容服务）—— Key 由你自备
 
 ## Build & Run

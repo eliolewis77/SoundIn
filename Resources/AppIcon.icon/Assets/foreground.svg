@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
+  <!-- 前景层：声波渐弱三连条 + 绿色输入块 + 白色 I 型光标（透明背景）。
+       元素已在画布居中、四周留白充足，符合系统安全区要求 -->
+  <g fill="#FFFFFF">
+    <rect x="284" y="432" width="48" height="160" rx="24"/>
+    <rect x="380" y="368" width="48" height="288" rx="24" opacity="0.8"/>
+    <rect x="476" y="304" width="48" height="416" rx="24" opacity="0.55"/>
+  </g>
+  <rect x="572" y="320" width="80" height="384" rx="34" fill="#97C459"/>
+  <rect x="700" y="320" width="40" height="384" rx="20" fill="#FFFFFF"/>
+</svg>
