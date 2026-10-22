@@ -180,8 +180,8 @@ final class HotkeyInputManager {
             .intersection(.deviceIndependentFlagsMask).rawValue
     )
 
-    /// 三块独立触发：单击切换 + 长按说话 + 框选截图，快捷键互不影响
-    enum TriggerKind: String { case click, hold, screenshot }
+    /// 三块独立触发 + 录音期间的 Esc 取消（cancelEsc 仅作 Carbon 分派标签，不是可配置快捷键）
+    enum TriggerKind: String { case click, hold, screenshot, cancelEsc }
     enum CaptureTarget: String { case click, hold }
 
     var clickShortcut: Shortcut = loadClickShortcut() {
@@ -830,9 +830,14 @@ final class HotkeyInputManager {
         guard !hasLoggedKeyEventProbe, event.type == .keyDown else { return }
         hasLoggedKeyEventProbe = true
         let ax = AXIsProcessTrusted()
-        HotkeyFileLog.shared.log("monitor: first keyDown observed, axTrusted=\(ax), translateEnabled=\(SpeechManager.shared.translateEnabled), translateKey=\(Self.translateKeyName(translateKey))")
+        // kCGSSessionSecureInputPID 非空即系统处于 Secure Event Input，值是占用进程的 PID
+        let secureInputPID = (CGSessionCopyCurrentDictionary() as? [String: Any])?["kCGSSessionSecureInputPID"] as? Int
+        HotkeyFileLog.shared.log("monitor: first keyDown observed, axTrusted=\(ax), secureInputPID=\(secureInputPID.map(String.init) ?? "none"), translateEnabled=\(SpeechManager.shared.translateEnabled), translateKey=\(Self.translateKeyName(translateKey))")
         if !ax {
             HotkeyFileLog.shared.log("monitor: WARNING — 无辅助功能权限，全局键盘事件不会投递，语音快捷键与连击翻译均失效")
+        }
+        if let secureInputPID {
+            HotkeyFileLog.shared.log("monitor: WARNING — Secure Event Input 被 PID \(secureInputPID) 占用（常见于第三方输入法/密码框），全局监听收不到 keyDown，字符键功能与 Esc 的 NSEvent 路径失效")
         }
     }
 
@@ -860,12 +865,13 @@ final class HotkeyInputManager {
                 )
                 guard result == noErr, keyCode.signature == OSType(0x5653484B) else { return noErr } // VHK
 
-                // id=1 → 单击触发；id=2 → 长按触发；id=3 → 框选截图
+                // id=1 → 单击触发；id=2 → 长按触发；id=3 → 框选截图；id=4 → 录音中的 Esc 取消
                 let kind: TriggerKind
                 switch keyCode.id {
                 case 1: kind = .click
                 case 2: kind = .hold
                 case 3: kind = .screenshot
+                case 4: kind = .cancelEsc
                 default: return noErr
                 }
                 let isRelease = GetEventKind(event) == UInt32(kEventHotKeyReleased)
@@ -937,6 +943,36 @@ final class HotkeyInputManager {
         hotKeyHandler = nil
     }
 
+    /// 录音期间动态注册的 Esc 取消热键（id=4）。
+    /// 为什么不依赖 NSEvent 监听里的 Esc 分支：全局 monitor 在 Secure Event Input
+    /// 被第三方输入法等进程占用时收不到 keyDown（flagsChanged 仍正常投递），Esc 取消
+    /// 会整体静默失效（2026-10-21 实测：20+ 小时零 keyDown 投递、探针未命中）；而
+    /// Carbon RegisterEventHotKey 通道不受影响（同期 F1 截图正常触发）。
+    /// 不并入 registerCarbonHotKey：后者在任何快捷键变更/录制时都会全量重注册，
+    /// Esc 只在录音期间有意义，独立管理生命周期。
+    private var escHotKeyRef: EventHotKeyRef?
+
+    private func registerEscCancelHotKey() {
+        guard escHotKeyRef == nil else { return }
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(
+            UInt32(kVK_Escape), 0,
+            EventHotKeyID(signature: OSType(0x5653484B), id: 4),
+            GetApplicationEventTarget(),
+            0,
+            &ref
+        )
+        if status == noErr { escHotKeyRef = ref }
+        HotkeyFileLog.shared.log("esc hotkey: register status=\(status)")
+    }
+
+    private func unregisterEscCancelHotKey() {
+        guard let ref = escHotKeyRef else { return }
+        UnregisterEventHotKey(ref)
+        escHotKeyRef = nil
+        HotkeyFileLog.shared.log("esc hotkey: unregistered")
+    }
+
     fileprivate func handleTrigger(kind: TriggerKind) async {
         logger.notice("hotkey pressed (captureMode=\(self.isCaptureMode, privacy: .public), kind=\(kind.rawValue))")
         HotkeyFileLog.shared.log("hotkey pressed (captureMode=\(self.isCaptureMode), kind=\(kind.rawValue))")
@@ -948,6 +984,8 @@ final class HotkeyInputManager {
             press(.hold)
         case .screenshot:
             triggerScreenshot()
+        case .cancelEsc:
+            cancelRecording()
         }
     }
 
@@ -1581,27 +1619,36 @@ final class HotkeyInputManager {
             self.sessionID = nil
             self.timeoutTask?.cancel()
             self.timeoutTask = nil
+            self.unregisterEscCancelHotKey()
             self.onStateChange?(phase)
         }
         SpeechManager.shared.startRecordingSafe()
         onStateChange?(.recording)
 
+        var startFailed = false
         if SpeechManager.shared.isAwaitingPermission {
             // 权限弹窗进行中：不是启动失败。保持 isActive/sessionID，
             // 授权后回调会重新 startRecordingSafe 继续本次会话；拒绝则由 handler 上报。
             HotkeyFileLog.shared.log("rec: awaiting permission prompt — session kept alive")
         } else if let permissionMessage = SpeechManager.shared.errorMessage {
+            startFailed = true
             isActive = false
             sessionID = nil
             timeoutTask?.cancel()
             timeoutTask = nil
             onStateChange?(.permissionDenied(message: permissionMessage))
         } else if !SpeechManager.shared.isRecording {
+            startFailed = true
             isActive = false
             sessionID = nil
             timeoutTask?.cancel()
             timeoutTask = nil
             onStateChange?(.failure(message: "录音启动失败"))
+        }
+        // 启动成功（含权限弹窗进行中，用户此时也可能想取消）才接管 Esc；
+        // 失败路径不注册，避免 Esc 被全局吞掉
+        if !startFailed {
+            registerEscCancelHotKey()
         }
 
         timeoutTask?.cancel()
@@ -1621,6 +1668,7 @@ final class HotkeyInputManager {
         isShortcutHeld = false
         isHoldActive = false
         isFinishing = false
+        unregisterEscCancelHotKey()
         timeoutTask?.cancel()
         timeoutTask = nil
         longPressTask?.cancel()
@@ -1637,6 +1685,7 @@ final class HotkeyInputManager {
         isShortcutHeld = false
         isHoldActive = false
         isFinishing = true
+        unregisterEscCancelHotKey()
         timeoutTask?.cancel()
         timeoutTask = nil
         onStateChange?(.transcribing)
