@@ -132,8 +132,11 @@ struct SoundInApp: App {
                 phase = SoundInApp.currentPhase
             }
         } label: {
-            // 空闲时显示品牌标识（三根声波条 + 细光标），其余状态保留 SF Symbol 以传达实时信息
+            // 空闲时显示品牌标识（三根声波条 + 细光标），其余状态保留 SF Symbol 以传达实时信息。
+            // 取消属一次性反馈（HUD 胶囊已短暂提示"已取消"），状态栏图标维持品牌标识不切红 X
             if case .idle = phase {
+                Image(nsImage: Self.brandMenuBarIcon)
+            } else if case .cancelled = phase {
                 Image(nsImage: Self.brandMenuBarIcon)
             } else {
                 Image(systemName: statusIcon)
@@ -907,6 +910,7 @@ private struct SettingsView: View {
             }
             .disabled(profileStore.profiles.count <= 1)
             .buttonStyle(HoverableButtonStyle(tint: .red))
+            Spacer()
             connectionTestButton(isRunning: isTesting) {
                 await onTest()
             }
