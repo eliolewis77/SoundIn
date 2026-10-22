@@ -222,14 +222,6 @@ final class HotkeyInputManager {
         }
     }
 
-    /// 截图完成后是否弹出 OCR 操作面板（本地 Vision 识别入口）。默认开启。
-    /// 默认 true 必须用 object(forKey:) 读取——bool(forKey:) 缺 key 时返回 false，
-    /// 会把默认值静默反转（VoiceInputHUD.isEnabled 同款坑）
-    var screenshotOCRPanelEnabled: Bool =
-        UserDefaults.standard.object(forKey: "voiceInputScreenshotOCRPanel") as? Bool ?? true {
-        didSet { UserDefaults.standard.set(screenshotOCRPanelEnabled, forKey: "voiceInputScreenshotOCRPanel") }
-    }
-
     // MARK: - 连击翻译触发设置
 
     /// 连击翻译的触发键（纯按键，不带修饰键）。默认 Shift。
@@ -381,6 +373,8 @@ final class HotkeyInputManager {
         // 后开始的会覆盖句柄导致先开始的泄漏、结束时会错删对方的监听
         endTriggerKeyCapture()
         endSystemCapture()
+        // 收起选区遮罩：它的 Carbon Esc（id=5）不归录制管，留着会抢走录制用的 Esc
+        ScreenshotOverlay.shared.cancel()
         logger.notice("shortcut capture begin")
         HotkeyFileLog.shared.log("capture begin")
         isCaptureMode = true
@@ -431,6 +425,8 @@ final class HotkeyInputManager {
         // 与快捷键录制互斥（理由见 beginSystemCapture）
         endSystemCapture()
         endTriggerKeyCapture()
+        // 同 beginSystemCapture：遮罩的 Carbon Esc 会抢走录制用的 Esc
+        ScreenshotOverlay.shared.cancel()
         logger.notice("translate key capture begin")
         HotkeyFileLog.shared.log("translate-key capture begin")
         Self.isTriggerKeyCaptureActive = true
@@ -873,6 +869,16 @@ final class HotkeyInputManager {
                 )
                 guard result == noErr, keyCode.signature == OSType(0x5653484B) else { return noErr } // VHK
 
+                // id=5 → 选区遮罩期的 Esc 取消（在 kind 分派前独立处理，不属于可配置触发键）
+                if keyCode.id == 5 {
+                    if GetEventKind(event) != UInt32(kEventHotKeyReleased) {
+                        Task { @MainActor in
+                            ScreenshotOverlay.shared.handleEscHotKey()
+                        }
+                    }
+                    return noErr
+                }
+
                 // id=1 → 单击触发；id=2 → 长按触发；id=3 → 框选截图；id=4 → 录音中的 Esc 取消
                 let kind: TriggerKind
                 switch keyCode.id {
@@ -1026,7 +1032,6 @@ final class HotkeyInputManager {
                     self.isShortcutHeld = false
                     return
                 }
-                self.startRecording()
                 // startRecording 可能被截图框选等前置状态拒绝；只有真正启动才置位，
                 // 否则迟到的松手会经 release(.hold) 误杀后续 click 开启的录音
                 if self.startRecording() { self.isHoldActive = true }
@@ -1047,20 +1052,19 @@ final class HotkeyInputManager {
         }
     }
 
-    // MARK: - 框选截图（即截即贴）
+    // MARK: - 框选截图（自建选区遮罩）
 
-    /// 截图子进程（/usr/sbin/screencapture -i -c）。非 nil 即框选十字线在屏上。
-    /// 强引用持有：防止 terminationHandler 随进程对象释放而丢失
-    private var screenshotProcess: Process?
-    /// 系统框选十字线是否在屏幕上（screencapture -i 运行期间）
-    private var isScreenshotInFlight: Bool { screenshotProcess != nil }
+    /// 遮罩是否在屏上（快照/选区/工具栏任一阶段）——唯一事实源在 ScreenshotOverlay.phase
+    private var isScreenshotInFlight: Bool { ScreenshotOverlay.shared.isSessionActive }
 
-    /// 触发框选截图：调起系统原生框选 UI，松手后图片进剪贴板。
+    /// 触发框选截图：抓冻结帧后弹自建全屏遮罩，松手在选区旁弹工具栏。
     /// Carbon 热键（id=3）、NSEvent 兜底路径、菜单栏菜单三处共用此入口。
+    /// 行为变化：工具栏期再按 F1 会被 busy 守卫吞掉（旧 -i 链路退出即可重触发）——
+    /// 避免双工具栏，属预期取舍。
     func triggerScreenshot() {
-        // 互斥：十字线已弹 / 长按手势待决（否则十字线弹出后 0.7s 阈值到点会意外开始录音）/
+        // 互斥：遮罩已开 / 长按手势待决（否则遮罩弹出后 0.7s 阈值到点会意外开始录音）/
         // 录音中 / 收尾中 / 设置页正在录制快捷键或触发键——一律忽略
-        guard screenshotProcess == nil, !isShortcutHeld, !isActive, !isFinishing, !isCaptureMode,
+        guard !ScreenshotOverlay.shared.isSessionActive, !isShortcutHeld, !isActive, !isFinishing, !isCaptureMode,
               !Self.isShortcutCaptureActive, !Self.isTriggerKeyCaptureActive else {
             HotkeyFileLog.shared.log("screenshot: ignored (busy)")
             return
@@ -1073,38 +1077,16 @@ final class HotkeyInputManager {
             onStateChange?(.permissionDenied(message: "需要「屏幕录制」权限才能截图，请在系统设置中授权后重启 SoundIn"))
             return
         }
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        // -i 交互式框选（阻塞到用户完成，故必须异步收尾）；-c 结果进剪贴板而非文件
-        process.arguments = ["-i", "-c"]
-        process.terminationHandler = { proc in
-            let code = proc.terminationStatus
-            Task { @MainActor [weak self] in
-                self?.screenshotProcess = nil
-                // 成功不弹提示（系统框选本身即反馈）；非 0 多为 Esc 取消，属常态操作，
-                // 弹失败提示会次次打扰——只记日志
-                HotkeyFileLog.shared.log("screenshot: finished exit=\(code)")
-                // 仅 exit 0（真截到图）且开关开：在鼠标附近弹 OCR 操作面板。
-                // 此刻剪贴板未必已写入（screencapture 先退进程后写板也可能），
-                // 但面板只在点击「文字识别」时才读板，无竞态
-                if code == 0, self?.screenshotOCRPanelEnabled == true {
-                    ScreenshotOCRPanel.shared.presentActionPanel(near: NSEvent.mouseLocation)
-                }
-            }
-        }
-        do {
-            try process.run()
-        } catch {
-            HotkeyFileLog.shared.log("screenshot: spawn failed — \(error.localizedDescription)")
-            onStateChange?(.failure(message: "无法启动截图工具：\(error.localizedDescription)"))
-            return
-        }
-        screenshotProcess = process
+        // 收起在屏浮窗：旧内容不能被冻进快照帧（hide 是 0.2s 淡出动画，
+        // screencapture 启动比它快，必须用立即隐藏的变体），也顺带顶掉在途 OCR 结果
+        ScreenshotOCRPanel.shared.hideImmediately()
+        TranslatePopup.shared.hideImmediately()
+        ScreenshotOverlay.shared.start()
     }
 
-    /// 退出前回收框选子进程：不回收的话 app 退出后十字线仍挂在屏幕上无人认领
+    /// 退出前收起遮罩：terminate 在跑的快照子进程 + 摘掉全部窗口 + 注销 Esc 热键
     func cancelInFlightScreenshot() {
-        screenshotProcess?.terminate()
+        ScreenshotOverlay.shared.cancel()
     }
 
     var displayShortcut: String { clickShortcut.displayText }

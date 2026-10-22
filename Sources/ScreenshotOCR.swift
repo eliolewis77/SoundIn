@@ -3,25 +3,23 @@ import SwiftUI
 import Vision
 
 // MARK: - 截图 OCR
-// 框选截图完成后在鼠标附近弹出操作面板，点「文字识别」对剪贴板里的截图跑本地
-// Vision 识别（离线、免费、中英日），结果显示在可复制的结果浮窗里。
+// 选区工具栏「文字识别」对选区图片跑本地 Vision 识别（离线、免费、中英日），
+// 结果显示在可复制的结果浮窗里；浮窗的 failure 态也承载保存失败等轻量错误提示。
 // 面板非激活（不抢目标应用焦点）、可点击；外壳与显隐机制照抄 TranslatePopup：
-// 关闭手段：自动淡出（action 8s / 结果 15s）/ 关闭按钮 / Esc / 点击面板外任意处。
+// 关闭手段：自动淡出（识别中不计时 / 结果 15s / 失败 5s）/ 关闭按钮 / Esc / 点击面板外任意处。
 // Esc 与点击外部用事件监听实现，只在面板可见期间安装、关闭即拆除，且只观察
 // 不吞事件——录音中的 Esc 优先取消录音（Carbon 热键接管的按键不进事件流，
 // 面板监听天然收不到），面板不与之抢。
 // 识别在 Task.detached 里同步执行 Vision（perform 回调线程 = 调用线程），
-// 主线程只做剪贴板读取与 UI；Vision 不响应 Task 取消，过期结果靠代际计数丢弃。
+// 主线程只做 UI；Vision 不响应 Task 取消，过期结果靠代际计数丢弃。
+
+/// CGImage 非 Sendable；此处不变量是「构造后不可变、仅后台只读消费」——
+/// 装箱豁免严格并发检查，免去主线程 PNG 编码 + 后台解码的无谓往返
+struct SendableCGImage: @unchecked Sendable {
+    let cgImage: CGImage
+}
 
 enum ScreenshotOCR {
-    /// 读剪贴板里的图片数据（主线程调用，NSPasteboard 非线程安全）。
-    /// screencapture -c 写的是 TIFF，其他来源可能是 PNG，两种都接；读不到返回 nil。
-    /// 返回原始编码数据不做解码——重活（解码 + 识别）都在后台任务里。
-    static func readClipboardImageData() -> Data? {
-        NSPasteboard.general.data(forType: .tiff)
-            ?? NSPasteboard.general.data(forType: .png)
-    }
-
     /// 识别语言从听写的识别语言设置映射。截图里中英混排是常态，永远带 en-US 兜底；
     /// 用户显式选 English 则尊重、不带中文。
     @MainActor
@@ -33,19 +31,15 @@ enum ScreenshotOCR {
         }
     }
 
-    /// 同步 Vision 识别，重活全部在 detached 任务内：Data 进 String 出，
-    /// NSImage/CGImage/Request/Handler 都在闭包内创建与消费，无非 Sendable 跨隔离。
-    static func recognizeText(in imageData: Data, languages: [String]) async throws -> String {
+    /// 同步 Vision 识别，重活全部在 detached 任务内：图片进 String 出，
+    /// Request/Handler 都在闭包内创建与消费，无非 Sendable 跨隔离。
+    static func recognizeText(in image: SendableCGImage, languages: [String]) async throws -> String {
         try await Task.detached(priority: .userInitiated) {
-            guard let image = NSImage(data: imageData),
-                  let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-                throw CocoaError(.featureUnsupported, userInfo: [NSLocalizedDescriptionKey: "图片解码失败"])
-            }
             let request = VNRecognizeTextRequest()
             request.recognitionLevel = .accurate
             request.usesLanguageCorrection = true
             request.recognitionLanguages = languages
-            let handler = VNImageRequestHandler(cgImage: cgImage, options: [:])
+            let handler = VNImageRequestHandler(cgImage: image.cgImage, options: [:])
             try handler.perform([request])
             return request.results?
                 .compactMap { $0.topCandidates(1).first?.string }
@@ -59,70 +53,106 @@ final class ScreenshotOCRPanel {
     static let shared = ScreenshotOCRPanel()
     private init() {}
 
-    /// 四态：action（识别按钮）/ recognizing（loading）/ result（文字）/ failure（三种兜底）。
+    /// 三态：recognizing（loading）/ result（文字）/ failure（空结果、编码失败等兜底）。
     /// fileprivate：同文件的 ScreenshotOCRPanelView 要按它渲染
     fileprivate enum Mode {
-        case action                 // 「识别图中文字」按钮 + 关闭
         case recognizing            // 三点 loading
         case result(String)         // 可划选文字 + 复制 + 关闭
-        case failure(String)        // 剪贴板无图 / 空结果 / Vision 报错
+        case failure(String)
     }
 
-    private var mode: Mode = .action
+    private var mode: Mode = .recognizing
+    /// 浮窗标题：OCR 结果是「文字识别」；承载保存失败等其他错误时可改「截图」
+    private var panelTitle = "文字识别"
     private var panel: NSPanel?
-    /// 显示代际：present / hide 各递增，在途 OCR 结果、淡出动画与过期自动隐藏据此失效
+    /// 显示代际：present / hide 各递增，在途 OCR 结果、淡出动画与过期自动隐藏据此失效。
+    /// hide() 无条件递增（在可见性早退之前），所以 gen == generation 已蕴含"面板在屏"，
+    /// 不需要第二个失效标志
     private var generation = 0
     private var ocrTask: Task<Void, Never>?
     private var autoHideTask: Task<Void, Never>?
     private var dismissGlobalMonitor: Any?
     private var dismissLocalMonitor: Any?
-    /// 已被用户/自动关闭。关闭后迟到的 OCR 结果不得把面板重新弹出来。
-    private var isDismissed = false
-    /// 弹面板瞬间捕获的鼠标位；结果浮窗用同一锚点，识别几秒后鼠标移走位置也不漂
+    /// 弹面板瞬间捕获的锚点；结果浮窗用同一锚点，识别几秒后鼠标移走位置也不漂
     private var anchorPoint: NSPoint = .zero
     private var visibleFrame: NSRect = .zero
 
     // MARK: - 常量
 
-    static let actionWidth: CGFloat = 170
     static let resultWidth: CGFloat = 360
     static let maxHeight: CGFloat = 420
     /// 滚动变体里正文的固定高度
     static let maxBodyHeight: CGFloat = 340
-    static let actionAutoHideSeconds: TimeInterval = 8
     /// 与翻译弹窗一致，留够读完与划选的时间
     static let resultAutoHideSeconds: TimeInterval = 15
     static let failureAutoHideSeconds: TimeInterval = 5
 
     // MARK: - 入口
 
-    /// 截图成功后调用：在鼠标附近弹操作面板。只记锚点不读剪贴板——
-    /// screencapture 退进程与写剪贴板的时序有差异，真正读板延迟到点击识别时。
-    func presentActionPanel(near mouse: NSPoint) {
+    /// 截图工具栏「文字识别」入口：对给定图片立即开始识别，浮窗先进入 loading 态
+    func present(image: SendableCGImage, near anchor: NSPoint) {
+        panelTitle = "文字识别"
+        show(.recognizing, near: anchor, autoHide: nil)
+        HotkeyFileLog.shared.log("ocr: recognition started")
+        let langs = ScreenshotOCR.recognitionLanguages
+        let gen = generation
+        ocrTask = Task { [weak self] in
+            do {
+                let text = try await ScreenshotOCR.recognizeText(in: image, languages: langs)
+                guard let self, gen == self.generation else { return }
+                if text.isEmpty {
+                    HotkeyFileLog.shared.log("ocr: done, empty result")
+                    self.transition(to: .failure("未识别到文字"), autoHide: Self.failureAutoHideSeconds)
+                } else {
+                    HotkeyFileLog.shared.log("ocr: done, chars=\(text.count)")
+                    self.transition(to: .result(text), autoHide: Self.resultAutoHideSeconds)
+                }
+            } catch {
+                guard let self, gen == self.generation else { return }
+                HotkeyFileLog.shared.log("ocr: failed — \(error.localizedDescription)")
+                self.transition(to: .failure("识别失败：\(error.localizedDescription)"), autoHide: Self.failureAutoHideSeconds)
+            }
+        }
+    }
+
+    /// 轻量错误浮窗（保存失败等），不进识别流程。title 用于面板头部（如「截图」承载快照失败）
+    func presentFailure(_ message: String, near anchor: NSPoint, title: String = "文字识别") {
+        panelTitle = title
+        show(.failure(message), near: anchor, autoHide: Self.failureAutoHideSeconds)
+        HotkeyFileLog.shared.log("ocr: failure shown — \(message)")
+    }
+
+    /// 各入口共用的面板装配：重置失效状态 → 按 mode 重建内容 → 校准摆放 → 淡入 → 计时/监听
+    private func show(_ mode: Mode, near anchor: NSPoint, autoHide: TimeInterval?) {
         generation += 1
         ocrTask?.cancel()
         cancelAutoHide()
-        isDismissed = false
-        mode = .action
-        anchorPoint = mouse
-
+        self.mode = mode
+        self.anchorPoint = anchor
         let panel = ensurePanel()
         swapRoot(scroll: false)
-        placeAt(anchor: mouse, size: panel.frame.size)
         syncPanelSize()
         fadeIn(panel)
-        scheduleAutoHide(seconds: Self.actionAutoHideSeconds)
+        if let autoHide { scheduleAutoHide(seconds: autoHide) }
         installDismissMonitors()
-        HotkeyFileLog.shared.log("ocr: action panel shown at \(mouse)")
+    }
+
+    /// 识别完成后的状态切换：原地重建内容并重摆，不重播淡入
+    private func transition(to mode: Mode, autoHide: TimeInterval) {
+        self.mode = mode
+        swapRoot(scroll: false)
+        syncPanelSize()
+        scheduleAutoHide(seconds: autoHide)
     }
 
     func hide() {
+        // 无条件递增：让在途 OCR 结果、淡出完成回调、自动隐藏全部失效——
+        // gen == generation 一个条件即可判定"结果仍然新鲜"，无需第二失效标志
+        generation += 1
         cancelAutoHide()
         ocrTask?.cancel()
-        isDismissed = true
         removeDismissMonitors()
         guard let panel, panel.isVisible else { return }
-        generation += 1
         let gen = generation
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.2
@@ -135,51 +165,13 @@ final class ScreenshotOCRPanel {
         })
     }
 
-    // MARK: - 识别流程
-
-    private func startRecognition() {
-        cancelAutoHide()
+    /// 立即隐藏（无淡出）：截图冻结帧不能拍到淡出中的残影
+    func hideImmediately() {
         generation += 1
-        let gen = generation
-        guard let data = ScreenshotOCR.readClipboardImageData() else {
-            HotkeyFileLog.shared.log("ocr: clipboard has no image")
-            showFailure("剪贴板中没有图片", seconds: 3, generation: gen)
-            return
-        }
-        HotkeyFileLog.shared.log("ocr: recognition started, imageBytes=\(data.count)")
-        let langs = ScreenshotOCR.recognitionLanguages
-        mode = .recognizing
-        swapRoot(scroll: false)
-        syncPanelSize()
-        ocrTask = Task { [weak self] in
-            do {
-                let text = try await ScreenshotOCR.recognizeText(in: data, languages: langs)
-                guard let self, gen == self.generation, !self.isDismissed else { return }
-                if text.isEmpty {
-                    HotkeyFileLog.shared.log("ocr: done, empty result")
-                    self.showFailure("未识别到文字", seconds: Self.failureAutoHideSeconds, generation: gen)
-                } else {
-                    HotkeyFileLog.shared.log("ocr: done, chars=\(text.count)")
-                    self.mode = .result(text)
-                    self.swapRoot(scroll: false)
-                    self.syncPanelSize()
-                    self.scheduleAutoHide(seconds: Self.resultAutoHideSeconds)
-                }
-            } catch {
-                guard let self, gen == self.generation, !self.isDismissed else { return }
-                HotkeyFileLog.shared.log("ocr: failed — \(error.localizedDescription)")
-                self.showFailure("识别失败：\(error.localizedDescription)", seconds: Self.failureAutoHideSeconds, generation: gen)
-            }
-        }
-    }
-
-    /// failure 是三处兜底的公共出口；带 generation 校验，过期调用直接丢弃
-    private func showFailure(_ message: String, seconds: TimeInterval, generation gen: Int) {
-        guard gen == generation, !isDismissed else { return }
-        mode = .failure(message)
-        swapRoot(scroll: false)
-        syncPanelSize()
-        scheduleAutoHide(seconds: seconds)
+        cancelAutoHide()
+        ocrTask?.cancel()
+        removeDismissMonitors()
+        panel?.orderOut(nil)
     }
 
     // MARK: - 自动隐藏
@@ -278,7 +270,6 @@ final class ScreenshotOCRPanel {
     /// 按当前内容实测高度校准；超过上限换滚动变体再量，最后以同一锚点重摆（自动完成翻转与夹取）
     private func syncPanelSize() {
         guard let panel else { return }
-        let width = currentWidth
         var hosting = panel.contentView as? NSHostingView<AnyView>
         var fit = hosting?.fittingSize.height ?? 44
         if fit > Self.maxHeight {
@@ -287,15 +278,8 @@ final class ScreenshotOCRPanel {
             fit = hosting?.fittingSize.height ?? Self.maxHeight
         }
         let target = min(fit, Self.maxHeight)
-        placeAt(anchor: anchorPoint, size: NSSize(width: width, height: target))
+        placeAt(anchor: anchorPoint, size: NSSize(width: Self.resultWidth, height: target))
         panel.setFrame(panel.frame, display: true)
-    }
-
-    private var currentWidth: CGFloat {
-        switch mode {
-        case .action: Self.actionWidth
-        default: Self.resultWidth
-        }
     }
 
     // MARK: - 面板与内容
@@ -319,15 +303,14 @@ final class ScreenshotOCRPanel {
         return panel
     }
 
-    /// 用当前 mode 重建内容视图。状态切换（action → 识别中 → 结果/失败）与滚动变体都走这里：
+    /// 用当前 mode 重建内容视图。状态切换（识别中 → 结果/失败）与滚动变体都走这里：
     /// 内容很小，重建比依赖 Observable 原地 diff 更直接。
     private func swapRoot(scroll: Bool) {
         let panel = ensurePanel()
-        let width = currentWidth
         let view = ScreenshotOCRPanelView(
             mode: mode,
+            title: panelTitle,
             scroll: scroll,
-            onRecognize: { [weak self] in self?.startRecognition() },
             onCopy: { [weak self] in
                 guard let self, case .result(let text) = self.mode else { return }
                 NSPasteboard.general.clearContents()
@@ -335,7 +318,7 @@ final class ScreenshotOCRPanel {
             },
             onClose: { [weak self] in self?.hide() }
         )
-        panel.contentView = NSHostingView(rootView: AnyView(view.frame(width: width)))
+        panel.contentView = NSHostingView(rootView: AnyView(view.frame(width: Self.resultWidth)))
     }
 
     private func fadeIn(_ panel: NSPanel) {
@@ -353,9 +336,10 @@ final class ScreenshotOCRPanel {
 
 private struct ScreenshotOCRPanelView: View {
     let mode: ScreenshotOCRPanel.Mode
+    /// 面板头部标题：OCR 结果「文字识别」；承载快照/保存失败时可显示「截图」
+    let title: String
     /// 滚动变体：正文固定高、内部滚动（超长识别结果）
     let scroll: Bool
-    let onRecognize: () -> Void
     let onCopy: () -> Void
     let onClose: () -> Void
 
@@ -378,16 +362,9 @@ private struct ScreenshotOCRPanelView: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            if case .action = mode {
-                // action 态标题本身就是识别入口，header 只放标题文字
-                Label("截图 OCR", systemImage: "text.viewfinder")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(.secondary)
-            } else {
-                Label("文字识别", systemImage: "text.viewfinder")
-                    .font(.system(size: 12, weight: .bold))
-                    .foregroundStyle(.secondary)
-            }
+            Label(title, systemImage: "text.viewfinder")
+                .font(.system(size: 12, weight: .bold))
+                .foregroundStyle(.secondary)
             Spacer()
             if case .result(let text) = mode {
                 Button {
@@ -428,16 +405,6 @@ private struct ScreenshotOCRPanelView: View {
     @ViewBuilder
     private var stateContent: some View {
         switch mode {
-        case .action:
-            Button {
-                onRecognize()
-            } label: {
-                Label("识别图中文字", systemImage: "text.magnifyingglass")
-                    .font(.system(size: 12, weight: .medium))
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
         case .recognizing:
             HStack(spacing: 8) {
                 PopupLoadingDots()

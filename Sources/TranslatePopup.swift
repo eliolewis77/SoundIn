@@ -120,6 +120,15 @@ final class TranslatePopup {
         })
     }
 
+    /// 立即隐藏（无淡出）：截图冻结帧不能拍到淡出中的残影
+    func hideImmediately() {
+        generation += 1
+        cancelAutoHide()
+        isDismissed = true
+        removeDismissMonitors()
+        panel?.orderOut(nil)
+    }
+
     // MARK: - 自动隐藏
 
     private func scheduleAutoHide() {

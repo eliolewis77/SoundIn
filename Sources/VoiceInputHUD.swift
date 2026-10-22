@@ -230,7 +230,9 @@ final class VoiceInputHUDManager {
         window.backgroundColor = .clear
         window.isOpaque = false
         window.hasShadow = false
-        window.level = .floating
+        // .screenSaver：HUD 是全局指示器，要压过一切常规窗口——尤其自建截图遮罩
+        //（.screenSaver）之上，否则录音被遮罩拦截时的失败提示会被遮罩盖住看不见
+        window.level = .screenSaver
         window.ignoresMouseEvents = true
         window.collectionBehavior = [.canJoinAllSpaces, .transient]
         window.contentView = NSHostingView(rootView: VoiceInputCapsuleView(manager: self))
