@@ -202,6 +202,13 @@ final class HotkeyInputManager {
         didSet { saveScreenshotShortcut(); registerCarbonHotKey() }
     }
 
+    /// 指定虚拟键码是否被配成无修饰语触发键（截图取色的 C 热键注册前查冲突）
+    func isBareTriggerKey(_ keyCode: UInt16) -> Bool {
+        [clickShortcut, holdShortcut, screenshotShortcut].contains {
+            $0.keyCode == keyCode && $0.modifiersRawValue == 0
+        }
+    }
+
     static let defaultHoldThreshold: TimeInterval = 0.7
 
     var holdThreshold: TimeInterval = {
@@ -884,6 +891,16 @@ final class HotkeyInputManager {
                     if GetEventKind(event) != UInt32(kEventHotKeyReleased) {
                         Task { @MainActor in
                             ScreenshotOverlay.shared.handleUndoHotKey()
+                        }
+                    }
+                    return noErr
+                }
+
+                // id=7 → 截图选区期的 C 取色复制（同 id=5：独立于可配置触发键，忽略 release）
+                if keyCode.id == 7 {
+                    if GetEventKind(event) != UInt32(kEventHotKeyReleased) {
+                        Task { @MainActor in
+                            ScreenshotOverlay.shared.handleColorPickHotKey()
                         }
                     }
                     return noErr

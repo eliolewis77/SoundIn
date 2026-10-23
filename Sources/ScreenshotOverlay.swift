@@ -12,7 +12,8 @@ import UniformTypeIdentifiers
 // 生命周期：idle → snapshotting → selecting → toolbar → idle。
 // Swift 6：CGImage 非 Sendable，全程 MainActor 创建与消费（跨线程用 SendableCGImage 装箱）；
 // Process.terminationHandler 里只把 Sendable（exit code、路径）送进 Task { @MainActor }。
-// Esc 走临时 Carbon 热键 id=5、标注撤销走 ⌘Z id=6——Secure Event Input 下 NSEvent
+// Esc 走临时 Carbon 热键 id=5、标注撤销走 ⌘Z id=6、选区期取色复制走 C id=7（进工具栏即注销）——
+// Secure Event Input 下 NSEvent
 // 全局监听收不到 keyDown（见 HotkeyInputManager 录音 Esc id=4 的同类结论），Carbon 不受影响。
 
 /// 标注工具。工具栏按钮与 activeTool 的取值
@@ -37,6 +38,14 @@ struct AnnotationRenderState {
     var drawing: Annotation?
     var pixelated: CGImage?
     var palette: [NSColor]
+}
+
+/// 选区悬停期的取色徽标：跟随光标，展示冻结帧在光标处的颜色，C 复制后短暂切「已复制」态
+struct ColorBadge {
+    var position: NSPoint
+    var color: NSColor
+    var hex: String
+    var copied: Bool = false
 }
 
 @MainActor
@@ -76,6 +85,10 @@ final class ScreenshotOverlay {
     /// 整帧缩小版（马赛克源图），首次使用马赛克时惰性生成
     private var pixelatedImage: CGImage?
     private var toolbarModel: ToolbarModel?
+    // 取色（选区悬停期）
+    private var colorHotKeyRef: EventHotKeyRef?
+    private var colorBadge: ColorBadge?
+    private var copiedClearTask: Task<Void, Never>?
 
     // MARK: - 常量
 
@@ -92,6 +105,12 @@ final class ScreenshotOverlay {
     static let annotationPalette: [NSColor] = [.controlAccentColor, .systemRed, .systemYellow, .systemGreen]
     /// ⌥ 保存面板记住的上次目录（无沙盒，直接存路径）
     private static let lastSaveDirKey = "screenshot.lastSaveDir"
+    /// 取色 1×1 采样上下文：sRGB 读数（HEX 惯例），复用避免每次 mouseMoved 重建
+    private static let colorSampleContext = CGContext(
+        data: nil, width: 1, height: 1, bitsPerComponent: 8, bytesPerRow: 4,
+        space: CGColorSpace(name: CGColorSpace.sRGB)!,
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    )
 
     // MARK: - 生命周期
 
@@ -110,6 +129,10 @@ final class ScreenshotOverlay {
         pixelatedImage = nil
         annotationColorIndex = 0
         unregisterUndoHotKey()
+        unregisterColorHotKey()
+        colorBadge = nil
+        copiedClearTask?.cancel()
+        copiedClearTask = nil
         toolbarModel = nil
         let mouse = NSEvent.mouseLocation
         targetScreen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
@@ -144,6 +167,9 @@ final class ScreenshotOverlay {
         watchdogTask = nil
         unregisterEscHotKey()
         unregisterUndoHotKey()
+        unregisterColorHotKey()
+        copiedClearTask?.cancel()
+        copiedClearTask = nil
         toolbarPanel?.orderOut(nil)
         overlayPanel?.orderOut(nil)
         NSCursor.pop()
@@ -156,6 +182,7 @@ final class ScreenshotOverlay {
         drawingAnnotation = nil
         drawingStart = nil
         annotationColorIndex = 0
+        colorBadge = nil
         toolbarModel = nil
         selectionRect = .zero
         dragStart = nil
@@ -266,7 +293,9 @@ final class ScreenshotOverlay {
             onMouseDown: { [weak self] in self?.handleMouseDown($0) },
             onMouseDragged: { [weak self] in self?.handleMouseDragged($0) },
             onMouseUp: { [weak self] in self?.handleMouseUp($0) },
-            onRightClick: { [weak self] in self?.cancel() }
+            onMouseMoved: { [weak self] in self?.handleMouseMoved($0) },
+            onRightClick: { [weak self] in self?.cancel() },
+            colorBadge: { [weak self] in self?.colorBadge }
         )
         overlayView = view
         panel.contentView = view
@@ -279,6 +308,16 @@ final class ScreenshotOverlay {
         // 光标矩形在窗口前置后不会自动刷新，主动失效一次让十字线立即生效
         panel.invalidateCursorRects(for: view)
         phase = .selecting
+        // 取色热键只在选区期接管 C：快照期与工具栏期不注册，缩小吞键窗口
+        registerColorHotKey()
+        // 遮罩出现即在光标处出徽标，不等第一次 mouseMoved
+        let mouseLocal = NSPoint(
+            x: NSEvent.mouseLocation.x - panel.frame.origin.x,
+            y: NSEvent.mouseLocation.y - panel.frame.origin.y
+        )
+        if view.bounds.contains(mouseLocal) {
+            handleMouseMoved(mouseLocal)
+        }
         HotkeyFileLog.shared.log("overlay: selecting (screen \(screen.frame.size), scale=\(pixelScale))")
     }
 
@@ -301,7 +340,39 @@ final class ScreenshotOverlay {
         HotkeyFileLog.shared.log("overlay: mouseDown at (\(Int(p.x)), \(Int(p.y)))")
         dragStart = p
         selectionRect = .zero
+        colorBadge = nil
         overlayView?.needsDisplay = true
+    }
+
+    /// 悬停取色：只失效新旧徽标并集（全幅重绘在 5K 屏 60Hz 移动下不可接受，同拖拽策略）
+    private func handleMouseMoved(_ p: NSPoint) {
+        guard phase == .selecting, dragStart == nil, let view = overlayView else { return }
+        let old = colorBadge
+        guard let sample = sampledColor(at: p) else {
+            if old != nil {
+                colorBadge = nil
+                view.invalidateColorBadge(old: old, new: nil)
+            }
+            return
+        }
+        // 1.2s 复制反馈窗内继续移动（如在同一色块上微调）保持「已复制」态，由 copiedClearTask 统一收尾
+        colorBadge = ColorBadge(position: p, color: sample.color, hex: sample.hex, copied: old?.copied == true)
+        view.invalidateColorBadge(old: old, new: colorBadge)
+    }
+
+    /// 光标处冻结帧取色。取原始帧而非压暗+标注后的合成画面：取色的对象是截图瞬间的屏幕内容
+    private func sampledColor(at p: NSPoint) -> (color: NSColor, hex: String)? {
+        guard let image = snapshotImage, let ctx = Self.colorSampleContext,
+              let crop = pixelRect(for: NSRect(x: p.x, y: p.y, width: 1, height: 1))
+                  .flatMap({ image.cropping(to: $0) }) else { return nil }
+        ctx.draw(crop, in: CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard let data = ctx.data else { return nil }
+        let bytes = data.bindMemory(to: UInt8.self, capacity: 4)
+        return (
+            NSColor(srgbRed: CGFloat(bytes[0]) / 255, green: CGFloat(bytes[1]) / 255,
+                    blue: CGFloat(bytes[2]) / 255, alpha: 1),
+            String(format: "#%02X%02X%02X", bytes[0], bytes[1], bytes[2])
+        )
     }
 
     private func handleMouseDragged(_ p: NSPoint) {
@@ -351,6 +422,11 @@ final class ScreenshotOverlay {
 
     private func enterToolbarPhase() {
         phase = .toolbar
+        // 工具栏期 C 交还前台应用，不再吞键
+        unregisterColorHotKey()
+        copiedClearTask?.cancel()
+        copiedClearTask = nil
+        colorBadge = nil
         let model = ToolbarModel()
         toolbarModel = model
         let panel = ensureToolbarPanel()
@@ -613,11 +689,10 @@ final class ScreenshotOverlay {
         }
         NSPasteboard.general.clearContents()
         let copied = NSPasteboard.general.setData(tiff, forType: .tiff)
-        HotkeyFileLog.shared.log("overlay: copied to pasteboard")
+        HotkeyFileLog.shared.log("overlay: copied to pasteboard copied=\(copied)")
         dismiss()
-        if copied {
-            ScreenshotOCRPanel.feedback.presentSuccess("已复制截图", near: anchor)
-        } else {
+        // 成功不弹提示：遮罩收起本身就是反馈；失败仍走浮窗
+        if !copied {
             ScreenshotOCRPanel.shared.presentFailure("复制失败，请重试", near: anchor, title: "截图")
         }
     }
@@ -764,6 +839,58 @@ final class ScreenshotOverlay {
         undoLastAnnotation()
     }
 
+    // MARK: - C 取色复制（临时 Carbon 热键 id=7，仅选区期注册）
+
+    private func registerColorHotKey() {
+        guard colorHotKeyRef == nil else { return }
+        // 触发键被配成裸 C 时不注册：Carbon 重复注册首个生效，取色会静默失效还劫持触发键
+        guard !HotkeyInputManager.shared.isBareTriggerKey(UInt16(kVK_ANSI_C)) else {
+            HotkeyFileLog.shared.log("overlay: color-pick hotkey skipped (bare C is a trigger shortcut)")
+            return
+        }
+        var ref: EventHotKeyRef?
+        let status = RegisterEventHotKey(
+            UInt32(kVK_ANSI_C), 0,
+            EventHotKeyID(signature: OSType(0x5653484B), id: 7),
+            GetApplicationEventTarget(),
+            0,
+            &ref
+        )
+        if status == noErr { colorHotKeyRef = ref }
+        HotkeyFileLog.shared.log("overlay: color-pick hotkey register status=\(status)")
+    }
+
+    private func unregisterColorHotKey() {
+        if let ref = colorHotKeyRef { UnregisterEventHotKey(ref) }
+        colorHotKeyRef = nil
+    }
+
+    /// Carbon C（id=7）派发入口：复制悬停徽标当前色值，会话不退出（取色常是连续动作）。
+    /// 反馈画在徽标自身——结果浮窗是 .floating 层，会被 .screenSaver 遮罩盖住
+    func handleColorPickHotKey() {
+        // 多屏时热键是全局的：光标已离开遮罩所在屏时徽标是陈旧采样，不能照抄
+        guard phase == .selecting, dragStart == nil, let badge = colorBadge, let view = overlayView,
+              let panel = overlayPanel, NSMouseInRect(NSEvent.mouseLocation, panel.frame, false) else { return }
+        NSPasteboard.general.clearContents()
+        guard NSPasteboard.general.setString(badge.hex, forType: .string) else {
+            HotkeyFileLog.shared.log("overlay: color copy FAILED \(badge.hex)")
+            return
+        }
+        let old = colorBadge
+        colorBadge?.copied = true
+        view.invalidateColorBadge(old: old, new: colorBadge)
+        copiedClearTask?.cancel()
+        copiedClearTask = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(1.2))
+            guard !Task.isCancelled, let self, self.colorBadge?.copied == true,
+                  let view = self.overlayView else { return }
+            let copied = self.colorBadge
+            self.colorBadge?.copied = false
+            view.invalidateColorBadge(old: copied, new: self.colorBadge)
+        }
+        HotkeyFileLog.shared.log("overlay: color copied \(badge.hex)")
+    }
+
     // MARK: - 窗口
 
     private func ensureOverlayPanel() -> NSPanel {
@@ -895,7 +1022,9 @@ private final class OverlayContentView: NSView {
     private var onMouseDown: ((NSPoint) -> Void)?
     private var onMouseDragged: ((NSPoint) -> Void)?
     private var onMouseUp: ((NSPoint) -> Void)?
+    private var onMouseMoved: ((NSPoint) -> Void)?
     private var onRightClick: (() -> Void)?
+    private var colorBadgeProvider: (() -> ColorBadge?)?
 
     func configure(snapshotImage: CGImage, pixelScale: CGFloat, dimAlpha: CGFloat,
                    selectionProvider: @escaping () -> NSRect,
@@ -904,7 +1033,9 @@ private final class OverlayContentView: NSView {
                    onMouseDown: @escaping (NSPoint) -> Void,
                    onMouseDragged: @escaping (NSPoint) -> Void,
                    onMouseUp: @escaping (NSPoint) -> Void,
-                   onRightClick: @escaping () -> Void) {
+                   onMouseMoved: @escaping (NSPoint) -> Void,
+                   onRightClick: @escaping () -> Void,
+                   colorBadge: @escaping () -> ColorBadge?) {
         self.snapshotImage = snapshotImage
         self.pixelScale = pixelScale
         self.dimAlpha = dimAlpha
@@ -914,7 +1045,9 @@ private final class OverlayContentView: NSView {
         self.onMouseDown = onMouseDown
         self.onMouseDragged = onMouseDragged
         self.onMouseUp = onMouseUp
+        self.onMouseMoved = onMouseMoved
         self.onRightClick = onRightClick
+        self.colorBadgeProvider = colorBadge
     }
 
     /// 会话结束释放冻结帧（整屏解码位图 ~几十 MB，菜单栏应用不能留着）
@@ -937,6 +1070,9 @@ private final class OverlayContentView: NSView {
             path.lineWidth = 1.5
             NSColor.white.setStroke()
             path.stroke()
+            if let badge = colorBadgeProvider?() {
+                drawColorBadge(badge)
+            }
             return
         }
         // ③ 拖拽中/工具栏期：全幅压暗 + 选区内重画冻结帧原样亮显（cropping 是 O(1) 引用操作）
@@ -992,6 +1128,82 @@ private final class OverlayContentView: NSView {
         text.draw(at: NSPoint(x: pill.minX + pad, y: pill.minY + 3), withAttributes: attrs)
     }
 
+    // MARK: 取色徽标
+
+    /// 徽标失效区：新旧 pill 并集外扩后夹回视图。nil 徽标的 .zero 不参与并集
+    /// （zero.union 会把原点拖进 dirty 区，会话首帧会多一次大面积重绘）
+    func invalidateColorBadge(old: ColorBadge?, new: ColorBadge?) {
+        var dirty = colorBadgeRect(for: new)
+        let oldRect = colorBadgeRect(for: old)
+        if oldRect != .zero { dirty = dirty.union(oldRect) }
+        setNeedsDisplay(bounds.intersection(dirty.insetBy(dx: -4, dy: -4)))
+    }
+
+    /// 徽标 pill 矩形（视图局部）：光标右上 16pt 避开十字线，贴边翻转；nil → .zero。
+    /// 失效区计算与 draw 共用同一几何，防止两份推导漂移
+    func colorBadgeRect(for badge: ColorBadge?) -> NSRect {
+        guard let badge else { return .zero }
+        var x = badge.position.x + 16
+        var y = badge.position.y + 16
+        if x + Self.colorBadgePillSize.width > bounds.maxX - 4 { x = badge.position.x - 16 - Self.colorBadgePillSize.width }
+        if y + Self.colorBadgePillSize.height > bounds.maxY - 4 { y = badge.position.y - 16 - Self.colorBadgePillSize.height }
+        return NSRect(origin: NSPoint(x: x, y: y), size: Self.colorBadgePillSize)
+    }
+
+    /// pill 尺寸固定：HEX 等宽字体 7 字符 + 两种提示取宽，悬停热路径不逐次量字
+    private static let colorBadgePillSize: NSSize = {
+        let hexWidth = ("#000000" as NSString).size(withAttributes: colorBadgeHexAttributes).width
+        let hintWidth = max(
+            ("C 复制" as NSString).size(withAttributes: colorBadgeHintAttributes).width,
+            ("已复制" as NSString).size(withAttributes: colorBadgeHintAttributes).width
+        )
+        let contentWidth = ceil(max(hexWidth, hintWidth))
+        let width: CGFloat = 10 + 18 + 7 + contentWidth + 10
+        return NSSize(width: width, height: 44)
+    }()
+
+    private static let colorBadgeHexAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.monospacedSystemFont(ofSize: 13, weight: .medium),
+        .foregroundColor: NSColor.white
+    ]
+
+    private static let colorBadgeHintAttributes: [NSAttributedString.Key: Any] = [
+        .font: NSFont.systemFont(ofSize: 10),
+        .foregroundColor: NSColor.white.withAlphaComponent(0.65)
+    ]
+
+    private static func colorBadgeHint(_ badge: ColorBadge) -> String {
+        badge.copied ? "已复制" : "C 复制"
+    }
+
+    private func drawColorBadge(_ badge: ColorBadge) {
+        let pill = colorBadgeRect(for: badge)
+        NSColor.black.withAlphaComponent(0.65).setFill()
+        NSBezierPath(roundedRect: pill, xRadius: 6, yRadius: 6).fill()
+        // 色块双描边（黑打底白芯）同十字光标套路，深浅色都可见
+        let swatch = NSRect(x: pill.minX + 10, y: pill.minY + (pill.height - 18) / 2, width: 18, height: 18)
+        let swatchPath = NSBezierPath(roundedRect: swatch, xRadius: 4, yRadius: 4)
+        badge.color.setFill()
+        swatchPath.fill()
+        swatchPath.lineWidth = 2
+        NSColor.black.withAlphaComponent(0.35).setStroke()
+        swatchPath.stroke()
+        swatchPath.lineWidth = 1
+        NSColor.white.setStroke()
+        swatchPath.stroke()
+        // 上行 HEX、下行操作提示：快捷键不写在文档里写在界面上
+        let hex = badge.hex as NSString
+        let hexSize = hex.size(withAttributes: Self.colorBadgeHexAttributes)
+        let textX = swatch.maxX + 7
+        let textW = pill.maxX - 10 - textX
+        hex.draw(in: NSRect(x: textX, y: pill.maxY - 8 - hexSize.height, width: textW, height: hexSize.height),
+                 withAttributes: Self.colorBadgeHexAttributes)
+        let hint = Self.colorBadgeHint(badge) as NSString
+        let hintSize = hint.size(withAttributes: Self.colorBadgeHintAttributes)
+        hint.draw(in: NSRect(x: textX, y: pill.minY + 7, width: textW, height: hintSize.height),
+                  withAttributes: Self.colorBadgeHintAttributes)
+    }
+
     // MARK: 鼠标
 
     override func mouseDown(with event: NSEvent) {
@@ -1000,6 +1212,10 @@ private final class OverlayContentView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         onMouseDragged?(convert(event.locationInWindow, from: nil))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        onMouseMoved?(convert(event.locationInWindow, from: nil))
     }
 
     override func mouseUp(with event: NSEvent) {
@@ -1023,7 +1239,7 @@ private final class OverlayContentView: NSView {
         }
         addTrackingArea(NSTrackingArea(
             rect: bounds,
-            options: [.activeAlways, .inVisibleRect, .cursorUpdate],
+            options: [.activeAlways, .inVisibleRect, .cursorUpdate, .mouseMoved],
             owner: self,
             userInfo: ["cursor": true]
         ))
