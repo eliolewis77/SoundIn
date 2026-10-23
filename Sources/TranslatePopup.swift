@@ -5,7 +5,7 @@ import SwiftUI
 // 不可编辑上下文（静态网页 / 文档 / PDF）里选中文字 + 连击触发键：原地写回不可行
 //（退格可能误触浏览器后退、粘贴也无处可去），译文显示在选区附近的浮窗里。
 // 面板非激活（不抢目标应用焦点）、可点击（复制 / 关闭），弹出瞬间页面仍可滚动阅读。
-// 关闭手段：15s 自动淡出 / 关闭按钮 / Esc / 点击弹窗外任意处 / 下次触发替换。
+// 关闭手段：短结果 15s 自动淡出（交互后保留，长文手动关闭）/ 关闭按钮 / Esc / 点击弹窗外任意处 / 下次触发替换。
 // Esc 与点击外部用事件监听实现，监听**只在弹窗可见期间安装、关闭即拆除**——
 // 不给常驻键盘热路径加开销；且只观察不吞事件（与方案 B 一致），Esc 和点击
 // 照常送达目标应用，弹窗只是跟着关。
@@ -47,15 +47,15 @@ final class TranslatePopup {
 
     // MARK: - 常量
 
-    static let width: CGFloat = 380
-    static let maxHeight: CGFloat = 520
+    static let width: CGFloat = ResultPanelStyle.width
+    static let maxHeight: CGFloat = ResultPanelStyle.maxHeight
     static let minHeight: CGFloat = 72
     /// 加载态的初始预估高度（真实高度 show 后立刻用 fittingSize 校准）
     static let initialHeight: CGFloat = 110
     /// 滚动变体里正文的固定高度
-    static let maxBodyHeight: CGFloat = 360
-    /// 自动淡出延时：留够读完一条短句的时间，长译文一般会手动关或被下次触发替换
-    static let autoHideSeconds: TimeInterval = 15
+    static let maxBodyHeight: CGFloat = ResultPanelStyle.bodyHeight
+    private var hasInteracted = false
+    private var contentScrolls = false
     /// 原文只作参照显示（≤3 行），超长截断，避免无谓的布局测量开销
     static let maxOriginalChars = 600
 
@@ -67,6 +67,7 @@ final class TranslatePopup {
         generation += 1
         cancelAutoHide()
         isDismissed = false
+        hasInteracted = false
         model.state = .loading
         model.original = String(original.prefix(Self.maxOriginalChars))
 
@@ -75,7 +76,6 @@ final class TranslatePopup {
         placeNear(anchor: anchor, contentHeight: Self.initialHeight)
         syncPanelSize()
         fadeIn(panel)
-        scheduleAutoHide()
         installDismissMonitors()
         HotkeyFileLog.shared.log("popup: shown originalChars=\(original.count) anchor=\(anchor.map { "\($0.size)" } ?? "nil")")
     }
@@ -133,12 +133,26 @@ final class TranslatePopup {
 
     private func scheduleAutoHide() {
         cancelAutoHide()
+        guard !hasInteracted else { return }
+        let delay: TimeInterval
+        switch model.state {
+        case .loading: return
+        case .success(let text):
+            guard let resultDelay = ResultPanelStyle.autoHideDelay(for: text, scrolls: contentScrolls) else { return }
+            delay = resultDelay
+        case .failure: delay = 8
+        }
         let gen = generation
         autoHideTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(Self.autoHideSeconds))
+            try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, let self, gen == self.generation else { return }
             self.hide()
         }
+    }
+
+    private func keepOpen() {
+        hasInteracted = true
+        cancelAutoHide()
     }
 
     private func cancelAutoHide() {
@@ -152,7 +166,7 @@ final class TranslatePopup {
 
     private func installDismissMonitors() {
         guard dismissGlobalMonitor == nil else { return }
-        let mask: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown]
+        let mask: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel]
         // 全局监听只能观察不能拦截（NSEvent 的限制），正好符合"不吞事件"的设计：
         // Esc 和点击照常送达目标应用，弹窗只是跟着关闭
         dismissGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
@@ -181,6 +195,9 @@ final class TranslatePopup {
 
     private func handleDismissEvent(_ event: NSEvent) {
         guard panel?.isVisible == true else { return }
+        if let panel, panel.frame.contains(NSEvent.mouseLocation) || event.window === panel {
+            keepOpen()
+        }
         switch event.type {
         case .keyDown:
             if event.keyCode == Self.escapeKeyCode, !event.isARepeat {
@@ -244,7 +261,8 @@ final class TranslatePopup {
         guard let panel else { return }
         var hosting = panel.contentView as? NSHostingView<AnyView>
         var fit = hosting?.fittingSize.height ?? Self.minHeight
-        if fit > Self.maxHeight {
+        contentScrolls = fit > Self.maxHeight
+        if contentScrolls {
             swapRoot(scroll: true)
             hosting = panel.contentView as? NSHostingView<AnyView>
             fit = hosting?.fittingSize.height ?? Self.maxHeight
@@ -273,8 +291,10 @@ final class TranslatePopup {
             model: model,
             scroll: scroll,
             onClose: { [weak self] in self?.hide() },
+            onInteraction: { [weak self] in self?.keepOpen() },
             onCopy: { [weak self] in
                 guard let self, case .success(let text) = self.model.state else { return }
+                self.keepOpen()
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
             }
@@ -330,12 +350,11 @@ private struct TranslatePopupView: View {
     /// 滚动变体：正文固定高、内部滚动（超长译文）
     let scroll: Bool
     let onClose: () -> Void
+    let onInteraction: () -> Void
     let onCopy: () -> Void
 
-    @State private var justCopied = false
-
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: ResultPanelStyle.spacing) {
             header
             if !model.original.isEmpty {
                 Text(model.original)
@@ -346,44 +365,22 @@ private struct TranslatePopupView: View {
             Divider()
             bodyContent
         }
-        .padding(14)
+        .onHover { if $0 { onInteraction() } }
+        .padding(ResultPanelStyle.padding)
         .frame(width: TranslatePopup.width, alignment: .topLeading)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: ResultPanelStyle.cornerRadius, style: .continuous))
         // 材质在浅色页面（白底文档）上边界模糊，补一圈极淡的描边
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: ResultPanelStyle.cornerRadius, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.08))
         )
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            Label("翻译", systemImage: "character.book.closed.fill")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.secondary)
-            Spacer()
-            if case .success = model.state {
-                Button {
-                    onCopy()
-                    justCopied = true
-                    Task {
-                        try? await Task.sleep(for: .seconds(1.2))
-                        justCopied = false
-                    }
-                } label: {
-                    Label(justCopied ? "已复制" : "复制", systemImage: justCopied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            Button(action: onClose) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-        }
+        let canCopy: Bool
+        if case .success = model.state { canCopy = true } else { canCopy = false }
+        return ResultPanelHeader(title: "翻译", systemImage: "character.book.closed.fill",
+                                 onCopy: canCopy ? onCopy : nil, onClose: onClose)
     }
 
     @ViewBuilder

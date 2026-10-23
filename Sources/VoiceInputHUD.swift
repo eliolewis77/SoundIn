@@ -73,15 +73,15 @@ final class VoiceInputHUDManager {
                 // 方案 C：成功静默，立即淡出
                 hide(after: 0)
             } else {
-                update(phase: .failure(message: "已复制，请手动粘贴"), message: nil)
-                hide(after: 1.8)
+                update(phase: .failure(message: "已复制，请手动粘贴"), message: "已复制，请手动粘贴")
+                hide(after: 4)
             }
         case .cancelled:
             update(phase: .cancelled, message: "已取消")
             hide(after: 0.8)
         case .permissionDenied(let msg), .failure(let msg):
-            update(phase: .failure(message: msg), message: nil)
-            hide(after: 2.2)
+            update(phase: .failure(message: msg), message: msg)
+            hide(after: 6)
         case .idle:
             hide(after: 0)
         }
@@ -120,8 +120,7 @@ final class VoiceInputHUDManager {
 
         phase = newPhase
         if let newMessage {
-            // 失败信息可能较长，截断以适配胶囊宽度
-            message = newMessage.count > 14 ? String(newMessage.prefix(14)) + "…" : newMessage
+            message = newMessage
         }
         guard let window = hudWindow, window.isVisible else {
             // 失败/取消提示若发生在窗口从未显示时（典型：权限拒绝、启动失败），
@@ -214,10 +213,21 @@ final class VoiceInputHUDManager {
     // MARK: - 窗口管理
     /// 窗口固定尺寸（与视图外层 frame 一致）：收缩动画发生在窗口内部，
     /// 窗口本身不做 setFrame 跳变（否则与 SwiftUI 动画不同步，视觉错位）。
-    /// 高度 = 胶囊 46 + 上方替换提示条区 32；胶囊始终贴底，位置与旧版一致
+    /// 常规高度 = 胶囊 40 + 上方替换提示区 32；失败提示单独扩宽并支持两行
     static let windowSize = NSSize(width: 136, height: 72)
     /// 胶囊本体高度（视图布局用）
     static let capsuleHeight: CGFloat = 40
+
+    var isShowingFailure: Bool {
+        if case .failure = phase { return true }
+        return false
+    }
+
+    var presentationSize: NSSize {
+        isShowingFailure ? NSSize(width: 320, height: 88) : Self.windowSize
+    }
+
+    var currentCapsuleHeight: CGFloat { isShowingFailure ? 56 : Self.capsuleHeight }
 
     private func ensureWindow() -> NSPanel {
         if let hudWindow { return hudWindow }
@@ -247,7 +257,7 @@ final class VoiceInputHUDManager {
         let screen = NSScreen.screens.first { NSMouseInRect(mouseLocation, $0.frame, false) } ?? NSScreen.main
         guard let screen else { return }
         let screenFrame = screen.visibleFrame
-        let size = Self.windowSize
+        let size = presentationSize
         let x = screenFrame.minX + (screenFrame.width - size.width) / 2
         let y = screenFrame.minY + 76
         window.setFrame(NSRect(x: x, y: y, width: size.width, height: size.height), display: true)
@@ -259,10 +269,6 @@ struct VoiceInputCapsuleView: View {
     let manager: VoiceInputHUDManager
     @State private var isVoiceActive = false
 
-    static let windowWidth: CGFloat = VoiceInputHUDManager.windowSize.width
-    /// 窗口总高：胶囊 40 + 上方提示区 32（胶囊贴底）
-    static let windowHeight: CGFloat = VoiceInputHUDManager.windowSize.height
-
     var body: some View {
         VStack(spacing: 7) {
             if showsReplaceTip {
@@ -271,7 +277,7 @@ struct VoiceInputCapsuleView: View {
             }
             capsuleBody
         }
-        .frame(width: Self.windowWidth, height: Self.windowHeight, alignment: .bottom)
+        .frame(width: manager.presentationSize.width, height: manager.presentationSize.height, alignment: .bottom)
         .animation(.easeOut(duration: 0.2), value: showsReplaceTip)
     }
 
@@ -284,7 +290,7 @@ struct VoiceInputCapsuleView: View {
     private var replaceTip: some View {
         Text("将替换选中的内容")
             .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(.white)
+            .foregroundStyle(Color(red: 0.13, green: 0.19, blue: 0.09))
             .padding(.horizontal, 12)
             .padding(.vertical, 5)
             .background(Capsule(style: .continuous).fill(Color(red: 0.59, green: 0.77, blue: 0.35)))
@@ -311,8 +317,10 @@ struct VoiceInputCapsuleView: View {
                 Text(hudTitle)
                     .font(.system(size: 12, weight: .bold))
                     .foregroundStyle(.white)
-                    .lineLimit(1)
+                    .lineLimit(manager.isShowingFailure ? 2 : 1)
                     .minimumScaleFactor(0.8)
+                    .truncationMode(.tail)
+                    .help(hudTitle)
 
                 Spacer(minLength: 6)
 
@@ -325,7 +333,7 @@ struct VoiceInputCapsuleView: View {
             .padding(.leading, 15)
             .padding(.trailing, 13)
         }
-        .frame(width: Self.windowWidth, height: VoiceInputHUDManager.capsuleHeight) // 胶囊固定尺寸：约束识别中进度条（GeometryReader）不撑满窗口
+        .frame(width: manager.presentationSize.width, height: manager.currentCapsuleHeight)
         .background(Color.black.opacity(0.82))
         .clipShape(RoundedRectangle(cornerRadius: 20, style: .continuous))
         .animation(.easeOut(duration: 0.12), value: phaseIdentity)

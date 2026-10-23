@@ -159,6 +159,27 @@ final class APIProfileStore: ObservableObject {
         profiles[index][keyPath: keyPath] = value
     }
 
+    @discardableResult
+    func duplicateProfile(_ id: UUID) -> APIProfile? {
+        guard let source = profiles.first(where: { $0.id == id }) else { return nil }
+        let baseName = "\(source.name) 副本"
+        var name = baseName
+        var suffix = 2
+        while profiles.contains(where: { $0.name == name }) {
+            name = "\(baseName) \(suffix)"
+            suffix += 1
+        }
+        let copy = APIProfile(name: name, baseURL: source.baseURL, apiKey: source.apiKey, modelName: source.modelName)
+        profiles.append(copy)
+        return copy
+    }
+
+    func renameProfile(_ id: UUID, to rawName: String) {
+        let name = rawName.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty else { return }
+        updateProfile(id, keyPath: \.name, value: name)
+    }
+
     /// 启动时把各处选中的配置档内容回写进 SpeechManager 的活动属性。
     func applyActive(to speech: SpeechManager) {
         if let p = selectedEngine {

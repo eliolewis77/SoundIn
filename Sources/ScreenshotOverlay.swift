@@ -604,16 +604,22 @@ final class ScreenshotOverlay {
     private func copyToPasteboard() {
         // 复制/保存带标注（烘焙失败兜底干净图，不因标注丢功能）
         guard phase == .toolbar, let cgImage = annotatedSelectionImage() ?? croppedSelectionImage() else { dismiss(); return }
+        let anchor = globalSelectionCenter()
         let rep = NSBitmapImageRep(cgImage: cgImage)
         guard let tiff = rep.tiffRepresentation else {
             dismiss()
-            ScreenshotOCRPanel.shared.presentFailure("图片编码失败", near: globalSelectionCenter(), title: "截图")
+            ScreenshotOCRPanel.shared.presentFailure("图片编码失败", near: anchor, title: "截图")
             return
         }
         NSPasteboard.general.clearContents()
-        NSPasteboard.general.setData(tiff, forType: .tiff)
+        let copied = NSPasteboard.general.setData(tiff, forType: .tiff)
         HotkeyFileLog.shared.log("overlay: copied to pasteboard")
         dismiss()
+        if copied {
+            ScreenshotOCRPanel.feedback.presentSuccess("已复制截图", near: anchor)
+        } else {
+            ScreenshotOCRPanel.shared.presentFailure("复制失败，请重试", near: anchor, title: "截图")
+        }
     }
 
     private func saveToDesktop() {
@@ -677,6 +683,11 @@ final class ScreenshotOverlay {
             do {
                 try (data as Data).write(to: target, options: .atomic)
                 HotkeyFileLog.shared.log("overlay: saved \(target.path)")
+                await MainActor.run {
+                    guard ScreenshotOverlay.shared.phase == .idle else { return }
+                    ScreenshotOCRPanel.feedback.presentSuccess(destination == nil ? "已保存到桌面" : "已保存截图",
+                                                            savedURL: target, near: anchor)
+                }
             } catch {
                 await MainActor.run {
                     ScreenshotOCRPanel.shared.presentFailure("保存失败：\(error.localizedDescription)", near: anchor, title: "截图")
@@ -1060,7 +1071,6 @@ private struct ToolbarView: View {
                     swatch(index: index)
                 }
             }
-            Divider().frame(height: 16)
             Button(action: onUndo) {
                 Image(systemName: "arrow.uturn.backward")
                     .font(.system(size: 12, weight: .medium))
@@ -1072,11 +1082,10 @@ private struct ToolbarView: View {
             .buttonStyle(.plain)
             .disabled(!model.canUndo)
             .help("撤销标注（⌘Z）")
+            .accessibilityLabel("撤销标注")
             Divider().frame(height: 16)
             button("文字识别", systemImage: "text.viewfinder", action: onOCR)
-            Divider().frame(height: 16)
             button("复制", systemImage: "doc.on.doc", action: onCopy)
-            Divider().frame(height: 16)
             button("保存", systemImage: "square.and.arrow.down", action: onSave,
                    help: "保存到桌面（按住 ⌥ 点击可选择位置）")
         }
@@ -1121,11 +1130,13 @@ private struct ToolbarView: View {
                         Circle().strokeBorder(Color.primary.opacity(0.55), lineWidth: 1)
                     }
                 }
-                .padding(2)
-                .contentShape(Circle())
+                .frame(width: 24, height: 24)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help("标注颜色")
+        .accessibilityLabel("标注颜色 \(index + 1)")
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     /// 标注工具按钮：图标态，激活时 accent 圆角底 + 白图标
@@ -1149,5 +1160,7 @@ private struct ToolbarView: View {
         }
         .buttonStyle(.plain)
         .help(title)
+        .accessibilityLabel(title)
+        .accessibilityAddTraits(active ? .isSelected : [])
     }
 }

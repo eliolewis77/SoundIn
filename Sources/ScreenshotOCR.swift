@@ -6,7 +6,7 @@ import Vision
 // 选区工具栏「文字识别」对选区图片跑本地 Vision 识别（离线、免费、中英日），
 // 结果显示在可复制的结果浮窗里；浮窗的 failure 态也承载保存失败等轻量错误提示。
 // 面板非激活（不抢目标应用焦点）、可点击；外壳与显隐机制照抄 TranslatePopup：
-// 关闭手段：自动淡出（识别中不计时 / 结果 15s / 失败 5s）/ 关闭按钮 / Esc / 点击面板外任意处。
+// 关闭手段：自动淡出（识别中不计时 / 短结果 15s，交互后保留 / 长文手动关闭）/ 关闭按钮 / Esc / 点击面板外任意处。
 // Esc 与点击外部用事件监听实现，只在面板可见期间安装、关闭即拆除，且只观察
 // 不吞事件——录音中的 Esc 优先取消录音（Carbon 热键接管的按键不进事件流，
 // 面板监听天然收不到），面板不与之抢。
@@ -51,6 +51,8 @@ enum ScreenshotOCR {
 @MainActor
 final class ScreenshotOCRPanel {
     static let shared = ScreenshotOCRPanel()
+    /// 截图完成提示独立显示，避免后台保存完成时覆盖正在阅读的 OCR 结果。
+    static let feedback = ScreenshotOCRPanel()
     private init() {}
 
     /// 三态：recognizing（loading）/ result（文字）/ failure（空结果、编码失败等兜底）。
@@ -59,6 +61,7 @@ final class ScreenshotOCRPanel {
         case recognizing            // 三点 loading
         case result(String)         // 可划选文字 + 复制 + 关闭
         case failure(String)
+        case notice(String, savedURL: URL?)
     }
 
     private var mode: Mode = .recognizing
@@ -76,16 +79,18 @@ final class ScreenshotOCRPanel {
     /// 弹面板瞬间捕获的锚点；结果浮窗用同一锚点，识别几秒后鼠标移走位置也不漂
     private var anchorPoint: NSPoint = .zero
     private var visibleFrame: NSRect = .zero
+    private var hasInteracted = false
+    private var contentScrolls = false
 
     // MARK: - 常量
 
-    static let resultWidth: CGFloat = 360
-    static let maxHeight: CGFloat = 420
+    static let resultWidth: CGFloat = ResultPanelStyle.width
+    static let maxHeight: CGFloat = ResultPanelStyle.maxHeight
     /// 滚动变体里正文的固定高度
-    static let maxBodyHeight: CGFloat = 340
+    static let maxBodyHeight: CGFloat = ResultPanelStyle.bodyHeight
     /// 与翻译弹窗一致，留够读完与划选的时间
     static let resultAutoHideSeconds: TimeInterval = 15
-    static let failureAutoHideSeconds: TimeInterval = 5
+    static let failureAutoHideSeconds: TimeInterval = 8
 
     // MARK: - 入口
 
@@ -122,12 +127,18 @@ final class ScreenshotOCRPanel {
         HotkeyFileLog.shared.log("ocr: failure shown — \(message)")
     }
 
+    func presentSuccess(_ message: String, savedURL: URL? = nil, near anchor: NSPoint) {
+        panelTitle = "截图"
+        show(.notice(message, savedURL: savedURL), near: anchor, autoHide: 4)
+    }
+
     /// 各入口共用的面板装配：重置失效状态 → 按 mode 重建内容 → 校准摆放 → 淡入 → 计时/监听
     private func show(_ mode: Mode, near anchor: NSPoint, autoHide: TimeInterval?) {
         generation += 1
         ocrTask?.cancel()
         cancelAutoHide()
         self.mode = mode
+        hasInteracted = false
         self.anchorPoint = anchor
         let panel = ensurePanel()
         swapRoot(scroll: false)
@@ -178,12 +189,23 @@ final class ScreenshotOCRPanel {
 
     private func scheduleAutoHide(seconds: TimeInterval) {
         cancelAutoHide()
+        guard !hasInteracted else { return }
+        var delay = seconds
+        if case .result(let text) = mode {
+            guard let resultDelay = ResultPanelStyle.autoHideDelay(for: text, scrolls: contentScrolls) else { return }
+            delay = resultDelay
+        }
         let gen = generation
         autoHideTask = Task { [weak self] in
-            try? await Task.sleep(for: .seconds(seconds))
+            try? await Task.sleep(for: .seconds(delay))
             guard !Task.isCancelled, let self, gen == self.generation else { return }
             self.hide()
         }
+    }
+
+    private func keepOpen() {
+        hasInteracted = true
+        cancelAutoHide()
     }
 
     private func cancelAutoHide() {
@@ -197,7 +219,7 @@ final class ScreenshotOCRPanel {
 
     private func installDismissMonitors() {
         guard dismissGlobalMonitor == nil else { return }
-        let mask: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown]
+        let mask: NSEvent.EventTypeMask = [.keyDown, .leftMouseDown, .rightMouseDown, .scrollWheel]
         dismissGlobalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] event in
             guard let self else { return }
             let captured = event
@@ -224,6 +246,9 @@ final class ScreenshotOCRPanel {
 
     private func handleDismissEvent(_ event: NSEvent) {
         guard panel?.isVisible == true else { return }
+        if let panel, panel.frame.contains(NSEvent.mouseLocation) || event.window === panel {
+            keepOpen()
+        }
         switch event.type {
         case .keyDown:
             if event.keyCode == Self.escapeKeyCode, !event.isARepeat {
@@ -272,7 +297,8 @@ final class ScreenshotOCRPanel {
         guard let panel else { return }
         var hosting = panel.contentView as? NSHostingView<AnyView>
         var fit = hosting?.fittingSize.height ?? 44
-        if fit > Self.maxHeight {
+        contentScrolls = fit > Self.maxHeight
+        if contentScrolls {
             swapRoot(scroll: true)
             hosting = panel.contentView as? NSHostingView<AnyView>
             fit = hosting?.fittingSize.height ?? Self.maxHeight
@@ -313,10 +339,12 @@ final class ScreenshotOCRPanel {
             scroll: scroll,
             onCopy: { [weak self] in
                 guard let self, case .result(let text) = self.mode else { return }
+                self.keepOpen()
                 NSPasteboard.general.clearContents()
                 NSPasteboard.general.setString(text, forType: .string)
             },
-            onClose: { [weak self] in self?.hide() }
+            onClose: { [weak self] in self?.hide() },
+            onInteraction: { [weak self] in self?.keepOpen() }
         )
         panel.contentView = NSHostingView(rootView: AnyView(view.frame(width: Self.resultWidth)))
     }
@@ -343,51 +371,29 @@ private struct ScreenshotOCRPanelView: View {
     let onCopy: () -> Void
     let onClose: () -> Void
 
-    @State private var justCopied = false
+    let onInteraction: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 9) {
+        VStack(alignment: .leading, spacing: ResultPanelStyle.spacing) {
             header
             Divider()
             bodyContent
         }
-        .padding(14)
-        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+        .onHover { if $0 { onInteraction() } }
+        .padding(ResultPanelStyle.padding)
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: ResultPanelStyle.cornerRadius, style: .continuous))
         // 材质在浅色底上边界模糊，补一圈极淡的描边
         .overlay(
-            RoundedRectangle(cornerRadius: 12, style: .continuous)
+            RoundedRectangle(cornerRadius: ResultPanelStyle.cornerRadius, style: .continuous)
                 .strokeBorder(Color.primary.opacity(0.08))
         )
     }
 
     private var header: some View {
-        HStack(spacing: 12) {
-            Label(title, systemImage: "text.viewfinder")
-                .font(.system(size: 12, weight: .bold))
-                .foregroundStyle(.secondary)
-            Spacer()
-            if case .result(let text) = mode {
-                Button {
-                    onCopy()
-                    justCopied = true
-                    Task {
-                        try? await Task.sleep(for: .seconds(1.2))
-                        justCopied = false
-                    }
-                } label: {
-                    Label(justCopied ? "已复制" : "复制", systemImage: justCopied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                }
-                .buttonStyle(.plain)
-            }
-            Button(action: onClose) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 14))
-                    .foregroundStyle(.secondary)
-            }
-            .buttonStyle(.plain)
-        }
+        let canCopy: Bool
+        if case .result = mode { canCopy = true } else { canCopy = false }
+        return ResultPanelHeader(title: title, systemImage: "text.viewfinder",
+                                 onCopy: canCopy ? onCopy : nil, onClose: onClose)
     }
 
     @ViewBuilder
@@ -416,6 +422,17 @@ private struct ScreenshotOCRPanelView: View {
             Text(text)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
+        case .notice(let message, let savedURL):
+            VStack(alignment: .leading, spacing: 8) {
+                Label(message, systemImage: "checkmark.circle.fill")
+                    .foregroundStyle(.primary)
+                if let savedURL {
+                    Button("在 Finder 中显示") {
+                        NSWorkspace.shared.activateFileViewerSelecting([savedURL])
+                    }
+                    .buttonStyle(.link)
+                }
+            }
         case .failure(let message):
             Label(message, systemImage: "exclamationmark.triangle.fill")
                 .font(.callout)

@@ -275,8 +275,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 }
 
 private struct SettingsView: View {
+    @Environment(\.colorScheme) private var colorScheme
+
     enum Page: String, CaseIterable, Identifiable {
-        case general, hotkeys, engine, polish, translate, stats, about
+        case general, hotkeys, engine, polish, translate, stats, history, about
 
         var id: String { rawValue }
 
@@ -288,6 +290,7 @@ private struct SettingsView: View {
             case .polish: "文字优化"
             case .translate: "翻译"
             case .stats: "统计"
+            case .history: "历史记录"
             case .about: "关于"
             }
         }
@@ -300,6 +303,7 @@ private struct SettingsView: View {
             case .polish: "wand.and.stars"
             case .translate: "character.book.closed"
             case .stats: "chart.bar.fill"
+            case .history: "clock.arrow.circlepath"
             case .about: "info.circle"
             }
         }
@@ -319,6 +323,10 @@ private struct SettingsView: View {
     @State private var newProfileName = ""
     @State private var addProfileTarget: Page = .engine
     @State private var profilePendingDelete: APIProfile?
+    @State private var profilePendingRename: APIProfile?
+    @State private var renamedProfileName = ""
+    private enum HistoryKind: String, CaseIterable { case input = "输入记录", translation = "翻译记录" }
+    @State private var historyKind: HistoryKind = .input
     @State private var clickShortcut: HotkeyInputManager.Shortcut = HotkeyInputManager.shared.clickShortcut
     @State private var holdShortcut: HotkeyInputManager.Shortcut = HotkeyInputManager.shared.holdShortcut
     @State private var screenshotShortcut: HotkeyInputManager.Shortcut = HotkeyInputManager.shared.screenshotShortcut
@@ -389,15 +397,17 @@ private struct SettingsView: View {
                 case .polish: polishPage
                 case .translate: translatePage
                 case .stats: statsPage
+                case .history: historyPage
                 case .about: aboutPage
                 }
             }
             .formStyle(.grouped)
-            // 主体页背景改为白色（浅色模式下；深色模式仍跟随系统以免文字不可读）
             .scrollContentBackground(.hidden)
+            // 主体页背景改为白色（浅色模式下；深色模式仍跟随系统以免文字不可读）
             .background(Color(nsColor: .controlBackgroundColor))
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
+        .navigationTitle(selectedPage.title)
         .toolbar {
             ToolbarItem(placement: .navigation) {
                 Button {
@@ -415,6 +425,15 @@ private struct SettingsView: View {
             polishConnectionTest = nil
             translateConnectionTest = nil
         }
+        // 授权完从系统设置切回本应用 → 触发重查
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            authRevision += 1
+        }
+        // 应用内系统授权弹窗里点「允许」不会走 activation 事件 → 可见期间每 2 秒兜底轮询
+        // 设置窗口内各功能页共用，避免切页后权限提示停留在旧状态。
+        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
+            authRevision += 1
+        }
         .alert("新建配置档", isPresented: $isAddingProfile) {
             TextField("名称", text: $newProfileName)
             Button("取消", role: .cancel) {}
@@ -429,7 +448,21 @@ private struct SettingsView: View {
                 }
             }
         } message: {
-            Text("为新的接口配置起个名字，之后填入地址、Key 和模型。")
+            Text("命名后填写接口地址、API Key 和模型。")
+        }
+        .alert("重命名配置", isPresented: Binding(
+            get: { profilePendingRename != nil },
+            set: { if !$0 { profilePendingRename = nil } }
+        )) {
+            TextField("名称", text: $renamedProfileName)
+            Button("取消", role: .cancel) { profilePendingRename = nil }
+            Button("保存") {
+                if let profile = profilePendingRename {
+                    profileStore.renameProfile(profile.id, to: renamedProfileName)
+                }
+                profilePendingRename = nil
+            }
+            .disabled(renamedProfileName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
         .confirmationDialog(
             "删除配置「\(profilePendingDelete?.name ?? "")」？",
@@ -452,6 +485,11 @@ private struct SettingsView: View {
                 profilePendingDelete = nil
             }
             Button("取消", role: .cancel) { profilePendingDelete = nil }
+        } message: {
+            if let profile = profilePendingDelete {
+                let consumers = profileConsumers(profile.id)
+                Text(consumers.isEmpty ? "此配置将被删除。" : "\(consumers.joined(separator: "、"))将切换到其他配置。")
+            }
         }
         .confirmationDialog(
             "清空全部输入历史？",
@@ -461,7 +499,7 @@ private struct SettingsView: View {
             Button("清空", role: .destructive) { history.clear() }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("最近输入记录将全部删除，听写统计数字不受影响。")
+            Text("删除全部输入记录，保留听写统计。")
         }
         .confirmationDialog(
             "清空全部翻译历史？",
@@ -471,7 +509,7 @@ private struct SettingsView: View {
             Button("清空", role: .destructive) { translationHistory.clear() }
             Button("取消", role: .cancel) {}
         } message: {
-            Text("翻译记录（原文与译文）将全部删除。")
+            Text("删除全部原文和译文记录。")
         }
     }
 
@@ -525,6 +563,7 @@ private struct SettingsView: View {
                     profileStore.updateProfile(selection, keyPath: keyPath, value: newValue)
                 }
                 onActiveChange(newValue)
+                profileStore.applyActive(to: speech)
                 // 配置字段变化后，三处（引擎/优化/翻译）的连接测试结果都可能与当前配置不一致，统一失效
                 engineConnectionTest = nil
                 polishConnectionTest = nil
@@ -594,20 +633,25 @@ private struct SettingsView: View {
                     HotkeyInputManager.shared.stripTrailingPunctuation = newValue
                 }
             ))
-            .help("开启后，粘贴的转写文本会去掉最后一个句号、问号、感叹号等终止标点。默认关闭。")
+            .help("移除转写末尾的句号、问号或感叹号。")
 
             Toggle("显示语音输入悬浮窗", isOn: Binding(
                 get: { VoiceInputHUDManager.shared.isEnabled },
                 set: { VoiceInputHUDManager.shared.isEnabled = $0 }
             ))
-            .help("录音/识别时在屏幕底部居中显示状态胶囊。关闭后仅菜单栏图标反映状态。默认开启。")
+            .help("在屏幕底部显示录音和识别状态；关闭后仅在菜单栏显示。")
         }
+        permissionsSection
     }
 
     // MARK: - 快捷键（单击 / 长按两块独立触发）
     @ViewBuilder
     private var hotkeysPage: some View {
         Section("单击触发") {
+            if !authSnapshot.axTrusted {
+                permissionRow(title: "快捷键与自动输入", granted: false, undetermined: false,
+                              panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            }
             HStack {
                 Text("单击快捷键")
                 Spacer()
@@ -635,31 +679,38 @@ private struct SettingsView: View {
             }
         }
 
-        Section("框选截图") {
+        Section {
             HStack {
                 Text("截图快捷键")
                 Spacer()
                 shortcutCaptureButton(.screenshot, title: screenshotShortcut.displayText)
             }
-            Text("按下快捷键进入框选：拖拽选区后，选区旁会弹出工具栏，可识别图中文字（本地 OCR，离线）、复制到剪贴板或保存到桌面；Esc、右键或单击空白处取消（一期仅覆盖触发时鼠标所在的显示器）。需要「屏幕录制」权限。默认 F1 在系统默认布局（F1 为亮度键）下按 fn+F1 触发。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-        }
-
-        Section {
-            Text("单击快捷键：点一下开始，再点一下结束。长按快捷键：按住说话，松开即停。两个快捷键同时生效。")
-                .font(.footnote)
-                .foregroundStyle(.secondary)
-            if let registrationError {
-                Text(registrationError)
-                    .font(.footnote)
-                    .foregroundStyle(.red)
+        } header: {
+            Text("框选截图")
+        } footer: {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("框选后可识字、复制或保存，Esc 取消。")
+                    .help("需「屏幕录制」权限，仅截取鼠标所在屏幕。右键或点空白处也可取消；F1 为亮度键时，请按 fn+F1。文字识别可离线使用。")
+                Text("单击开始／结束；长按说话，松开结束。")
+                if !authSnapshot.screenCaptureAuthorized {
+                    Button("授权屏幕录制") {
+                        openSettingsPanel("x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+                    }
+                    .buttonStyle(.link)
+                }
+                if let registrationError {
+                    Text(registrationError)
+                        .foregroundStyle(.red)
+                }
+                ForEach(consolidatedShortcutWarnings, id: \.self) { msg in
+                    Text(msg)
+                        .foregroundStyle(.orange)
+                }
             }
-            ForEach(consolidatedShortcutWarnings, id: \.self) { msg in
-                Text(msg)
-                    .font(.footnote)
-                    .foregroundStyle(.orange)
-            }
+            .font(.system(size: 12))
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -766,6 +817,15 @@ private struct SettingsView: View {
     @ViewBuilder
     private var enginePage: some View {
         Section("识别引擎") {
+            let auth = authSnapshot
+            if !auth.micAuthorized {
+                permissionRow(title: "麦克风", granted: false, undetermined: auth.micNotDetermined,
+                              panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+            }
+            if speech.recognitionProvider == .local && !auth.speechAuthorized {
+                permissionRow(title: "语音识别", granted: false, undetermined: auth.speechNotDetermined,
+                              panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition")
+            }
             Picker("识别方式", selection: $speech.recognitionProvider) {
                 Text("本机 Apple 语音识别").tag(SpeechManager.RecognitionProvider.local)
                 Text("OpenAI 兼容 API").tag(SpeechManager.RecognitionProvider.api)
@@ -804,7 +864,7 @@ private struct SettingsView: View {
                     onKeyChange: { speech.speechAPIKey = $0 },
                     onModelChange: { speech.speechModelName = $0 },
                     missingWarning: (speech.speechAPIBaseURL.isEmpty || speech.speechModelName.isEmpty)
-                        ? "API 模式需要填写 Base URL 和模型名称；API Key 可留空（本地网关通常不需要）。" : nil
+                        ? "请填写接口地址和模型；无需鉴权时可留空 API Key。" : nil
                 )
                 profileActionRow(
                     target: .engine,
@@ -889,7 +949,7 @@ private struct SettingsView: View {
         }
     }
 
-    /// 配置操作行：添加 / 删除当前配置 / 测试连接 + 测试结果
+    /// 低频管理操作收进菜单，保留测试连接与共享范围提示。
     @ViewBuilder
     private func profileActionRow(
         target: Page,
@@ -898,24 +958,62 @@ private struct SettingsView: View {
         testResult: SpeechManager.ConnectionTestResult?,
         onTest: @escaping () async -> Void
     ) -> some View {
+        if let selected {
+            let consumers = profileConsumers(selected.id)
+            if consumers.count > 1 {
+                Text("共用于：\(consumers.joined(separator: "、"))")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+            }
+        }
         HStack {
-            Button("＋ 添加配置") {
-                addProfileTarget = target
-                newProfileName = ""
-                isAddingProfile = true
+            Menu {
+                Button("添加配置", systemImage: "plus") {
+                    addProfileTarget = target
+                    newProfileName = ""
+                    isAddingProfile = true
+                }
+                if let selected {
+                    Button("重命名", systemImage: "pencil") {
+                        renamedProfileName = selected.name
+                        profilePendingRename = selected
+                    }
+                    Button("复制配置", systemImage: "doc.on.doc") {
+                        if let copy = profileStore.duplicateProfile(selected.id) {
+                            switch target {
+                            case .engine: selectEngineProfile(copy.id)
+                            case .polish: selectPolishProfile(copy.id)
+                            case .translate: selectTranslateProfile(copy.id)
+                            default: break
+                            }
+                        }
+                    }
+                    Divider()
+                    Button("删除配置", systemImage: "trash", role: .destructive) {
+                        profilePendingDelete = selected
+                    }
+                    .disabled(profileStore.profiles.count <= 1)
+                }
+            } label: {
+                Label("配置管理", systemImage: "ellipsis.circle")
             }
-            .buttonStyle(HoverableButtonStyle())
-            Button("删除当前配置", role: .destructive) {
-                profilePendingDelete = selected
-            }
-            .disabled(profileStore.profiles.count <= 1)
-            .buttonStyle(HoverableButtonStyle(tint: .red))
+            .menuStyle(.borderlessButton)
+            .fixedSize()
             Spacer()
             connectionTestButton(isRunning: isTesting) {
                 await onTest()
             }
         }
         connectionTestResult(testResult)
+    }
+
+    private func profileConsumers(_ id: UUID) -> [String] {
+        var consumers: [String] = []
+        if profileStore.engineSelectionID == id { consumers.append("语音识别") }
+        if profileStore.polishSelectionID == id { consumers.append("文字优化") }
+        if profileStore.translateSelectionID == id { consumers.append("翻译") }
+        return consumers
     }
 
     /// 连接测试结果：独立一行显示在按钮行下方，避免挤在按钮右侧
@@ -946,7 +1044,7 @@ private struct SettingsView: View {
                     onKeyChange: { speech.polishAPIKey = $0 },
                     onModelChange: { speech.polishModelName = $0 },
                     missingWarning: (speech.polishAPIBaseURL.isEmpty || speech.polishModelName.isEmpty)
-                        ? "需要填写接口地址和模型名称才能启用文字优化。" : nil
+                        ? "请填写接口地址和模型。" : nil
                 )
                 profileActionRow(
                     target: .polish,
@@ -971,7 +1069,7 @@ private struct SettingsView: View {
                         .frame(height: 96)
                         .scrollContentBackground(.hidden)
                     if speech.polishPromptTemplate.isEmpty {
-                        Text("留空使用系统默认优化指令")
+                        Text("留空使用默认指令")
                             .font(.footnote)
                             .foregroundStyle(.tertiary)
                             .padding(8)
@@ -991,7 +1089,7 @@ private struct SettingsView: View {
             }
 
             Section {
-                Text("启用后每次输出会多一次模型调用，输出延迟会相应增加；优化失败时将直接使用原始转写结果。")
+                Text("每次增加一次模型调用，输出稍慢；失败时保留原始转写。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             }
@@ -1018,7 +1116,7 @@ private struct SettingsView: View {
                     onKeyChange: { speech.translateAPIKey = $0 },
                     onModelChange: { speech.translateModelName = $0 },
                     missingWarning: (speech.translateAPIBaseURL.isEmpty || speech.translateModelName.isEmpty)
-                        ? "需要填写接口地址和模型名称才能使用连击翻译。" : nil
+                        ? "请填写接口地址和模型。" : nil
                 )
                 profileActionRow(
                     target: .translate,
@@ -1083,16 +1181,15 @@ private struct SettingsView: View {
                         .foregroundStyle(.orange)
                 }
 
-                Text("连按触发键到设定次数即翻译：输入框里有选区则替换选区、没有则替换全部；选中的是静态文本（网页等）时，译文显示在选区旁的弹窗里。触发键支持修饰键，如单独按 Shift。")
+                Text("按设定次数连击触发键（支持 Shift 等修饰键）。输入框内替换选中文字，未选中则替换全部；网页等文本的译文以弹窗显示。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
 
                 // 无辅助功能权限时 NSEvent 全局键盘 monitor 静默不投递事件，
                 // 表现是"按了完全没反应"且没有任何报错——必须在这里显式告知。
                 if !AXIsProcessTrusted() {
-                    Label("需要在「系统设置 → 隐私与安全性 → 辅助功能」中授权 SoundIn，否则无法监听按键。", systemImage: "exclamationmark.triangle.fill")
-                        .font(.footnote)
-                        .foregroundStyle(.orange)
+                    permissionRow(title: "辅助功能", granted: false, undetermined: false,
+                                  panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
                 }
             }
         }
@@ -1191,7 +1288,40 @@ private struct SettingsView: View {
             DictationHeatmapView(cells: stats.heatmapCells(weeks: 26))
         }
 
-        Section("最近输入") {
+    }
+
+    private var historyPicker: some View {
+        Picker("记录类型", selection: $historyKind) {
+            ForEach(HistoryKind.allCases, id: \.self) { kind in
+                Text(kind.rawValue).tag(kind)
+            }
+        }
+        .pickerStyle(.segmented)
+        .labelsHidden()
+    }
+
+    private var historyPickerHeader: some View {
+        HStack {
+            historyPicker.fixedSize()
+            Spacer(minLength: 0)
+        }
+        // grouped Form 的页头比卡片外缘多内收 10pt；控件按卡片外缘对齐。
+        .padding(.leading, -10)
+        .padding(.bottom, 8)
+    }
+
+    @ViewBuilder
+    private var historyPage: some View {
+        if historyKind == .input {
+            inputHistorySection
+        } else {
+            translationHistorySection
+        }
+    }
+
+    @ViewBuilder
+    private var inputHistorySection: some View {
+        Section {
             // 保留条数就放在列表旁边：调小立即裁剪，所见即所留
             Picker("保留条数", selection: Binding(
                 get: { history.maxEntries },
@@ -1203,7 +1333,7 @@ private struct SettingsView: View {
             }
 
             if history.entries.isEmpty {
-                Text("暂无记录，语音输入成功后显示在这里。")
+                Text("暂无记录，完成语音输入后显示。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
@@ -1230,13 +1360,17 @@ private struct SettingsView: View {
                         .buttonStyle(HoverableButtonStyle(tint: .red))
                 }
             }
+        } header: {
+            historyPickerHeader
         }
 
-        // 标题不用「最近翻译」：该字面量会被编译链路吞掉（二进制查无此串、区块头
-        // 渲染为空），换其他措辞正常——同文件其他 Section 标题均无此问题
+    }
+
+    @ViewBuilder
+    private var translationHistorySection: some View {
         Section {
             if translationHistory.entries.isEmpty {
-                Text("暂无翻译记录，连击翻译成功后显示在这里（最多保留 50 条）。")
+                Text("暂无翻译记录，最多保留 50 条。")
                     .font(.footnote)
                     .foregroundStyle(.secondary)
             } else {
@@ -1272,7 +1406,7 @@ private struct SettingsView: View {
                     .buttonStyle(HoverableButtonStyle(tint: .red))
             }
         } header: {
-            Text("翻译记录")
+            historyPickerHeader
         }
     }
 
@@ -1294,20 +1428,27 @@ private struct SettingsView: View {
     }
 
     private func statBox(value: Int, label: String, highlight: Bool = false) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
+        let highlightText = colorScheme == .dark
+            ? Color(red: 0.68, green: 0.84, blue: 0.50)
+            : Color(red: 0.21, green: 0.36, blue: 0.13)
+        let highlightBackground = colorScheme == .dark
+            ? Color(red: 0.13, green: 0.19, blue: 0.11)
+            : Color(red: 0.96, green: 0.98, blue: 0.93)
+
+        return VStack(alignment: .leading, spacing: 4) {
             Text("\(value)")
                 .font(.system(size: 20, weight: .bold, design: .rounded))
                 .monospacedDigit()
-                .foregroundStyle(highlight ? Color(red: 0.44, green: 0.62, blue: 0.24) : Color.primary)
+                .foregroundStyle(highlight ? highlightText : Color.primary)
             Text(label)
-                .font(.caption)
-                .foregroundStyle(.secondary)
+                .font(.system(size: 12))
+                .foregroundStyle(highlight ? highlightText : Color.secondary)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(12)
         .background(
             RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(highlight ? Color(red: 0.96, green: 0.98, blue: 0.93) : Color.primary.opacity(0.04))
+                .fill(highlight ? highlightBackground : Color.primary.opacity(0.04))
         )
     }
 
@@ -1330,6 +1471,10 @@ private struct SettingsView: View {
             .buttonStyle(HoverableButtonStyle())
         }
 
+    }
+
+    @ViewBuilder
+    private var permissionsSection: some View {
         Section("权限状态") {
             // 读一次 authRevision 让 body 对刷新计数产生依赖：revision 变化 → 重查权限
             let auth = authSnapshot
@@ -1341,18 +1486,10 @@ private struct SettingsView: View {
                          panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
             permissionRow(title: "屏幕录制（框选截图）", granted: auth.screenCaptureAuthorized, undetermined: false,
                          panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
-            Text("未授权项可点「去授权」直达对应设置面板；辅助功能换版本后失效时，在面板中删除旧条目重新添加即可；「屏幕录制」授权后需重启 SoundIn 才能生效。")
+            Text("点击「去授权」打开系统设置。屏幕录制授权后需重启 SoundIn。")
                 .font(.footnote)
                 .foregroundStyle(.secondary)
-        }
-        // 授权完从系统设置切回本应用 → 触发重查
-        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
-            authRevision += 1
-        }
-        // 应用内系统授权弹窗里点「允许」不会走 activation 事件 → 可见期间每 2 秒兜底轮询
-        //（四次 TCC 查询开销可忽略；区块随页面切走自动停表）
-        .onReceive(Timer.publish(every: 2, on: .main, in: .common).autoconnect()) { _ in
-            authRevision += 1
+                .help("辅助功能授权失效时，请在系统设置中删除旧条目，再重新添加 SoundIn。")
         }
     }
 

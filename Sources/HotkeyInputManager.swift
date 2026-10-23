@@ -1090,6 +1090,7 @@ final class HotkeyInputManager {
         // 收起在屏浮窗：旧内容不能被冻进快照帧（hide 是 0.2s 淡出动画，
         // screencapture 启动比它快，必须用立即隐藏的变体），也顺带顶掉在途 OCR 结果
         ScreenshotOCRPanel.shared.hideImmediately()
+        ScreenshotOCRPanel.feedback.hideImmediately()
         TranslatePopup.shared.hideImmediately()
         ScreenshotOverlay.shared.start()
     }
