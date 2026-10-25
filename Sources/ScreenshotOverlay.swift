@@ -72,8 +72,10 @@ final class ScreenshotOverlay {
     private var watchdogTask: Task<Void, Never>?
     private var escHotKeyRef: EventHotKeyRef?
     private var undoHotKeyRef: EventHotKeyRef?
-    private var overlayPanel: NSPanel?
+    private var overlayPanel: OverlayPanel?
     private var overlayView: OverlayContentView?
+    private var ownsCursorStackEntry = false
+    private var previousApplication: NSRunningApplication?
     private var toolbarPanel: NSPanel?
     // 标注状态（会话内，dismiss 全清）
     private var annotations: [Annotation] = []
@@ -136,8 +138,6 @@ final class ScreenshotOverlay {
         toolbarModel = nil
         let mouse = NSEvent.mouseLocation
         targetScreen = NSScreen.screens.first { NSMouseInRect(mouse, $0.frame, false) } ?? NSScreen.main
-        let cursor = Self.crosshairCursor
-        cursor.push()
         // Esc 从快照阶段就接管：挂起/显示重配等场景下子进程可能卡满看门狗时长，
         // 遮罩窗口那时还不存在，Carbon 热键是唯一可靠的取消通道
         registerEscHotKey()
@@ -172,11 +172,25 @@ final class ScreenshotOverlay {
         copiedClearTask = nil
         toolbarPanel?.orderOut(nil)
         overlayPanel?.orderOut(nil)
-        NSCursor.pop()
+        if ownsCursorStackEntry {
+            NSCursor.pop()
+            ownsCursorStackEntry = false
+        }
         // 冻结帧是整屏解码位图（5K 屏 ~56MB），会话结束必须释放，不能等下次覆盖
         snapshotImage = nil
         pixelatedImage = nil
         overlayView?.clearContent()
+        // 遮罩不跨截图会话复用，避免隐藏窗口残留的跟踪区域/光标矩形状态。
+        overlayPanel?.contentView = nil
+        overlayPanel?.close()
+        overlayPanel = nil
+        overlayView = nil
+        if let previousApplication,
+           NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
+           !previousApplication.isTerminated {
+            previousApplication.activate(options: [.activateIgnoringOtherApps])
+        }
+        previousApplication = nil
         annotations = []
         activeTool = nil
         drawingAnnotation = nil
@@ -270,7 +284,7 @@ final class ScreenshotOverlay {
         dragStart = nil
 
         let panel = ensureOverlayPanel()
-        let view = overlayView ?? OverlayContentView()
+        let view = OverlayContentView()
         view.configure(
             snapshotImage: image,
             pixelScale: pixelScale,
@@ -300,14 +314,38 @@ final class ScreenshotOverlay {
         overlayView = view
         panel.contentView = view
         panel.setFrame(screen.frame, display: false)
-        // 非激活面板 makeKey 不抢应用焦点，但能让点击/拖拽事件稳定送达遮罩
+        // 非激活面板即使成为 key，应用自己的光标也可能被前台应用覆盖。
+        // 冻结画面已抓取完才临时激活；退出后恢复原应用，不改变快照内容。
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        if frontmost?.processIdentifier != ProcessInfo.processInfo.processIdentifier {
+            previousApplication = frontmost
+        }
+        NSApp.activate(ignoringOtherApps: true)
+        Self.crosshairCursor.push()
+        ownsCursorStackEntry = true
+        // 激活后的遮罩接收鼠标/光标事件，结束后由 dismiss 恢复原应用。
         panel.makeKeyAndOrderFront(nil)
-        // 复用的视图 + 未变的 frame 不会触发重绘，图层会残留上一会话的选区帧——强制全量重绘
+        panel.makeFirstResponder(view)
+        // 首次呈现时同步绘制，避免窗口先显示空白内容。
         view.needsDisplay = true
         view.displayIfNeeded()
         // 光标矩形在窗口前置后不会自动刷新，主动失效一次让十字线立即生效
-        panel.invalidateCursorRects(for: view)
+        view.updateTrackingAreas()
+        panel.resetCursorRects()
+        // 窗口出现时鼠标可能已在视图内，没有进入事件；立即应用一次。
+        Self.crosshairCursor.set()
         phase = .selecting
+        // makeKey/orderFront 后 AppKit 还会在本轮事件结束时重置指针；在下一轮补设，
+        // 仅允许当前会话执行，防取消后或旧窗口的延迟回调把十字光标留在桌面。
+        DispatchQueue.main.async { [weak self, weak panel, weak view] in
+            guard let self, let panel, let view,
+                  self.phase == .selecting, self.overlayPanel === panel,
+                  self.overlayView === view, panel.isVisible,
+                  panel.frame.contains(NSEvent.mouseLocation) else { return }
+            panel.resetCursorRects()
+            Self.crosshairCursor.set()
+            HotkeyFileLog.shared.log("overlay: cursor ready key=\(panel.isKeyWindow) rects=\(panel.areCursorRectsEnabled)")
+        }
         // 取色热键只在选区期接管 C：快照期与工具栏期不注册，缩小吞键窗口
         registerColorHotKey()
         // 遮罩出现即在光标处出徽标，不等第一次 mouseMoved
@@ -435,6 +473,7 @@ final class ScreenshotOverlay {
             onOCR: { [weak self] in self?.runOCR() },
             onCopy: { [weak self] in self?.copyToPasteboard() },
             onSave: { [weak self] in self?.saveToDesktop() },
+            onPin: { [weak self] in self?.pinSelection() },
             onToggleTool: { [weak self] in self?.toggleTool($0) },
             onUndo: { [weak self] in self?.undoLastAnnotation() },
             onSetColor: { [weak self] in self?.setAnnotationColor($0) }
@@ -697,6 +736,22 @@ final class ScreenshotOverlay {
         }
     }
 
+    private func pinSelection() {
+        guard phase == .toolbar else { return }
+        let frame = globalSelectionRect()
+        guard let image = annotatedSelectionImage() ?? croppedSelectionImage() else {
+            dismiss()
+            ScreenshotOCRPanel.feedback.presentFailure("无法创建钉图，请重新截图", near: frame.origin, title: "截图")
+            return
+        }
+        dismiss()
+        guard PinnedScreenshotManager.shared.pin(image, at: frame) != nil else {
+            ScreenshotOCRPanel.feedback.presentFailure("无法创建钉图，请重试", near: frame.origin, title: "截图")
+            return
+        }
+        HotkeyFileLog.shared.log("overlay: pinned screenshot")
+    }
+
     private func saveToDesktop() {
         guard phase == .toolbar, let cgImage = annotatedSelectionImage() ?? croppedSelectionImage() else { dismiss(); return }
         let image = SendableCGImage(cgImage: cgImage)
@@ -893,7 +948,7 @@ final class ScreenshotOverlay {
 
     // MARK: - 窗口
 
-    private func ensureOverlayPanel() -> NSPanel {
+    private func ensureOverlayPanel() -> OverlayPanel {
         if let existing = overlayPanel { return existing }
         let panel = OverlayPanel(
             contentRect: .zero,
@@ -910,6 +965,7 @@ final class ScreenshotOverlay {
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         // NSPanel 默认 true：失活即隐藏——遮罩绝不能随 Cmd+Tab 走光
         panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
         // key window 才能稳定拿到指针控制权（cursorUpdate/光标矩形），鼠标拖拽也更可靠；
         // nonactivatingPanel 下成为 key 不会激活应用，不打断用户手头的事
         panel.acceptsMouseMovedEvents = true
@@ -939,22 +995,23 @@ final class ScreenshotOverlay {
     // MARK: - 白色十字光标
 
     static let crosshairCursor: NSCursor = {
-        let image = NSImage(size: NSSize(width: 17, height: 17), flipped: false) { _ in
+        let image = NSImage(size: NSSize(width: 21, height: 21), flipped: false) { _ in
             let path = NSBezierPath()
-            path.move(to: NSPoint(x: 8.5, y: 0))
-            path.line(to: NSPoint(x: 8.5, y: 17))
-            path.move(to: NSPoint(x: 0, y: 8.5))
-            path.line(to: NSPoint(x: 17, y: 8.5))
-            // 黑色宽线打底 + 白色细线为核：暗底亮底都可见
+            path.move(to: NSPoint(x: 10, y: 2))
+            path.line(to: NSPoint(x: 10, y: 18))
+            path.move(to: NSPoint(x: 2, y: 10))
+            path.line(to: NSPoint(x: 18, y: 10))
+            // 白色主体 + 半点黑边，避免原来 1pt 白核被粗黑线盖过视觉重心。
             path.lineWidth = 3
             NSColor.black.setStroke()
             path.stroke()
-            path.lineWidth = 1
+            path.lineWidth = 2
             NSColor.white.setStroke()
             path.stroke()
             return true
         }
-        return NSCursor(image: image, hotSpot: NSPoint(x: 8, y: 8))
+        image.isTemplate = false
+        return NSCursor(image: image, hotSpot: NSPoint(x: 10, y: 10))
     }()
 }
 
@@ -1010,6 +1067,7 @@ private func renderAnnotation(_ annotation: Annotation, in ctx: CGContext,
 // MARK: - 遮罩内容视图（NSView 自绘：冻结帧 + 压暗 + 选区高亮 + 尺寸提示）
 
 private final class OverlayContentView: NSView {
+    override var acceptsFirstResponder: Bool { true }
     private var snapshotImage: CGImage?
     private var pixelScale: CGFloat = 1
     private var dimAlpha: CGFloat = 0.28
@@ -1207,18 +1265,22 @@ private final class OverlayContentView: NSView {
     // MARK: 鼠标
 
     override func mouseDown(with event: NSEvent) {
+        ScreenshotOverlay.crosshairCursor.set()
         onMouseDown?(convert(event.locationInWindow, from: nil))
     }
 
     override func mouseDragged(with event: NSEvent) {
+        ScreenshotOverlay.crosshairCursor.set()
         onMouseDragged?(convert(event.locationInWindow, from: nil))
     }
 
     override func mouseMoved(with event: NSEvent) {
+        ScreenshotOverlay.crosshairCursor.set()
         onMouseMoved?(convert(event.locationInWindow, from: nil))
     }
 
     override func mouseUp(with event: NSEvent) {
+        ScreenshotOverlay.crosshairCursor.set()
         onMouseUp?(convert(event.locationInWindow, from: nil))
     }
 
@@ -1230,8 +1292,8 @@ private final class OverlayContentView: NSView {
         addCursorRect(bounds, cursor: ScreenshotOverlay.crosshairCursor)
     }
 
-    /// 非激活应用直接 NSCursor.push 会被前台应用的指针管理覆盖；靠 activeAlways 的
-    /// tracking area 接收 cursorUpdate（不依赖应用激活态），把指针钉成十字线
+    /// activeAlways 与 cursorUpdate 不能组合：AppKit 在该组合下不派发 cursorUpdate。
+    /// 始终跟踪移动/进入，光标更新单独随 key window 跟踪。
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         for area in trackingAreas where area.userInfo?["cursor"] != nil {
@@ -1239,13 +1301,23 @@ private final class OverlayContentView: NSView {
         }
         addTrackingArea(NSTrackingArea(
             rect: bounds,
-            options: [.activeAlways, .inVisibleRect, .cursorUpdate, .mouseMoved],
+            options: [.activeAlways, .inVisibleRect, .mouseEnteredAndExited, .mouseMoved, .enabledDuringMouseDrag],
+            owner: self,
+            userInfo: ["cursor": true]
+        ))
+        addTrackingArea(NSTrackingArea(
+            rect: bounds,
+            options: [.activeInKeyWindow, .inVisibleRect, .cursorUpdate],
             owner: self,
             userInfo: ["cursor": true]
         ))
     }
 
     override func cursorUpdate(with event: NSEvent) {
+        ScreenshotOverlay.crosshairCursor.set()
+    }
+
+    override func mouseEntered(with event: NSEvent) {
         ScreenshotOverlay.crosshairCursor.set()
     }
 }
@@ -1267,6 +1339,7 @@ private struct ToolbarView: View {
     let onOCR: () -> Void
     let onCopy: () -> Void
     let onSave: () -> Void
+    let onPin: () -> Void
     let onToggleTool: (AnnotationTool) -> Void
     let onUndo: () -> Void
     let onSetColor: (Int) -> Void
@@ -1304,6 +1377,8 @@ private struct ToolbarView: View {
             button("复制", systemImage: "doc.on.doc", action: onCopy)
             button("保存", systemImage: "square.and.arrow.down", action: onSave,
                    help: "保存到桌面（按住 ⌥ 点击可选择位置）")
+            button("钉图", systemImage: "pin", action: onPin,
+                   help: "将截图钉在屏幕上，可拖动或缩放")
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
