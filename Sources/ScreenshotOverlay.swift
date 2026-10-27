@@ -309,7 +309,10 @@ final class ScreenshotOverlay {
             onMouseUp: { [weak self] in self?.handleMouseUp($0) },
             onMouseMoved: { [weak self] in self?.handleMouseMoved($0) },
             onRightClick: { [weak self] in self?.cancel() },
-            colorBadge: { [weak self] in self?.colorBadge }
+            colorBadge: { [weak self] in self?.colorBadge },
+            cursor: { [weak self] in
+                self?.phase == .selecting ? Self.crosshairCursor : .arrow
+            }
         )
         overlayView = view
         panel.contentView = view
@@ -460,6 +463,11 @@ final class ScreenshotOverlay {
 
     private func enterToolbarPhase() {
         phase = .toolbar
+        // 松手即恢复箭头，同时失效旧的十字光标矩形，避免移动后又被覆盖。
+        if let overlayView {
+            overlayPanel?.invalidateCursorRects(for: overlayView)
+        }
+        NSCursor.arrow.set()
         // 工具栏期 C 交还前台应用，不再吞键
         unregisterColorHotKey()
         copiedClearTask?.cancel()
@@ -1083,6 +1091,8 @@ private final class OverlayContentView: NSView {
     private var onMouseMoved: ((NSPoint) -> Void)?
     private var onRightClick: (() -> Void)?
     private var colorBadgeProvider: (() -> ColorBadge?)?
+    private var cursorProvider: (() -> NSCursor)?
+    private var currentCursor: NSCursor { cursorProvider?() ?? .arrow }
 
     func configure(snapshotImage: CGImage, pixelScale: CGFloat, dimAlpha: CGFloat,
                    selectionProvider: @escaping () -> NSRect,
@@ -1093,7 +1103,8 @@ private final class OverlayContentView: NSView {
                    onMouseUp: @escaping (NSPoint) -> Void,
                    onMouseMoved: @escaping (NSPoint) -> Void,
                    onRightClick: @escaping () -> Void,
-                   colorBadge: @escaping () -> ColorBadge?) {
+                   colorBadge: @escaping () -> ColorBadge?,
+                   cursor: @escaping () -> NSCursor) {
         self.snapshotImage = snapshotImage
         self.pixelScale = pixelScale
         self.dimAlpha = dimAlpha
@@ -1106,6 +1117,7 @@ private final class OverlayContentView: NSView {
         self.onMouseMoved = onMouseMoved
         self.onRightClick = onRightClick
         self.colorBadgeProvider = colorBadge
+        self.cursorProvider = cursor
     }
 
     /// 会话结束释放冻结帧（整屏解码位图 ~几十 MB，菜单栏应用不能留着）
@@ -1265,22 +1277,22 @@ private final class OverlayContentView: NSView {
     // MARK: 鼠标
 
     override func mouseDown(with event: NSEvent) {
-        ScreenshotOverlay.crosshairCursor.set()
+        currentCursor.set()
         onMouseDown?(convert(event.locationInWindow, from: nil))
     }
 
     override func mouseDragged(with event: NSEvent) {
-        ScreenshotOverlay.crosshairCursor.set()
+        currentCursor.set()
         onMouseDragged?(convert(event.locationInWindow, from: nil))
     }
 
     override func mouseMoved(with event: NSEvent) {
-        ScreenshotOverlay.crosshairCursor.set()
+        currentCursor.set()
         onMouseMoved?(convert(event.locationInWindow, from: nil))
     }
 
     override func mouseUp(with event: NSEvent) {
-        ScreenshotOverlay.crosshairCursor.set()
+        currentCursor.set()
         onMouseUp?(convert(event.locationInWindow, from: nil))
     }
 
@@ -1289,7 +1301,7 @@ private final class OverlayContentView: NSView {
     }
 
     override func resetCursorRects() {
-        addCursorRect(bounds, cursor: ScreenshotOverlay.crosshairCursor)
+        addCursorRect(bounds, cursor: currentCursor)
     }
 
     /// activeAlways 与 cursorUpdate 不能组合：AppKit 在该组合下不派发 cursorUpdate。
@@ -1314,11 +1326,11 @@ private final class OverlayContentView: NSView {
     }
 
     override func cursorUpdate(with event: NSEvent) {
-        ScreenshotOverlay.crosshairCursor.set()
+        currentCursor.set()
     }
 
     override func mouseEntered(with event: NSEvent) {
-        ScreenshotOverlay.crosshairCursor.set()
+        currentCursor.set()
     }
 }
 
