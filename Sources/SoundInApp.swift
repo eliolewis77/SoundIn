@@ -262,8 +262,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 把识别/润色各自选中的 API 配置档回写进 SpeechManager（升级迁移后保证活动值一致）
         APIProfileStore.shared.applyActive(to: SpeechManager.shared)
         HotkeyInputManager.shared.start()
-        // 自动更新：延迟几秒静默检查，失败不打扰用户
-        AppUpdater.shared.scheduleStartupCheck()
+        // 自动更新：延迟几秒静默检查，失败不打扰用户；UI 测试实例跳过
+        // （Sparkle 在裸 SPM 二进制下 startUpdater 会弹模态错误框卡死主队列，
+        // SOUNDIN_UI_TEST 环境变量是合成帧 UI 验证的约定入口）
+        if ProcessInfo.processInfo.environment["SOUNDIN_UI_TEST"] == nil {
+            AppUpdater.shared.scheduleStartupCheck()
+        }
         HotkeyInputManager.shared.onStateChange = { newPhase in
             Task { @MainActor in
                 SoundInApp.currentPhase = newPhase

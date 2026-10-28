@@ -10,6 +10,8 @@ import UniformTypeIdentifiers
 // 撤销 / 复制 / 保存到桌面），标注烘焙进复制与保存的输出图（OCR 用无标注干净图）。
 // 一期只做鼠标所在屏；直接替换 screencapture -i 系统 UI。
 // 生命周期：idle → snapshotting → selecting → toolbar → idle。
+// 工具栏期可拖 8 手柄（4 边 + 4 角）缩放选区、选区内拖动整体平移（已画标注跟随），
+// 选区外空白点击仍整次取消；激活标注工具期间禁用调整，拖拽仍为绘制。
 // Swift 6：CGImage 非 Sendable，全程 MainActor 创建与消费（跨线程用 SendableCGImage 装箱）；
 // Process.terminationHandler 里只把 Sendable（exit code、路径）送进 Task { @MainActor }。
 // Esc 走临时 Carbon 热键 id=5、标注撤销走 ⌘Z id=6、选区期取色复制走 C id=7（进工具栏即注销）——
@@ -57,6 +59,28 @@ final class ScreenshotOverlay {
         case idle, snapshotting, selecting, toolbar
     }
 
+    /// 工具栏期选区命中区：hover 光标切换与 mouseDown 手势分流共用
+    private enum SelectionZone: Equatable {
+        case outside, inside, border(SelectionEdges)
+    }
+
+    /// 工具栏期选区调整手势（仅无激活标注工具时存在）
+    private enum SelectionGesture {
+        /// 选区内拖动：整体平移
+        case move(originalRect: NSRect, startPoint: NSPoint)
+        /// 拖边/角：按边集缩放
+        case resize(edges: SelectionEdges, originalRect: NSRect)
+    }
+
+    /// 选区四边集合（角 = 相邻两边组合）
+    private struct SelectionEdges: OptionSet {
+        let rawValue: UInt8
+        static let minX = SelectionEdges(rawValue: 1 << 0)
+        static let maxX = SelectionEdges(rawValue: 1 << 1)
+        static let minY = SelectionEdges(rawValue: 1 << 2)
+        static let maxY = SelectionEdges(rawValue: 1 << 3)
+    }
+
     private(set) var phase: Phase = .idle
     /// HotkeyInputManager.isScreenshotInFlight 读这里——phase 是唯一事实源
     var isSessionActive: Bool { phase != .idle }
@@ -68,6 +92,12 @@ final class ScreenshotOverlay {
     /// 选区，遮罩视图局部坐标（Cocoa 方向，原点左下）
     private var selectionRect = NSRect.zero
     private var dragStart: NSPoint?
+    /// 工具栏期选区调整手势（无激活工具时）：边/角拖 = 缩放，选区内拖 = 平移
+    private var selectionGesture: SelectionGesture?
+    /// 工具栏期光标悬停命中区，驱动缩放/移动/箭头光标切换
+    private var toolbarHoverZone: SelectionZone = .outside
+    /// 工具栏自然尺寸缓存：调整选区时逐事件重摆工具栏，量测只在色板收展后重做
+    private var cachedToolbarSize: NSSize?
     private var snapshotProcess: Process?
     private var watchdogTask: Task<Void, Never>?
     private var escHotKeyRef: EventHotKeyRef?
@@ -124,6 +154,8 @@ final class ScreenshotOverlay {
         phase = .snapshotting
         selectionRect = .zero
         dragStart = nil
+        selectionGesture = nil
+        toolbarHoverZone = .outside
         annotations = []
         activeTool = nil
         drawingAnnotation = nil
@@ -200,6 +232,9 @@ final class ScreenshotOverlay {
         toolbarModel = nil
         selectionRect = .zero
         dragStart = nil
+        selectionGesture = nil
+        toolbarHoverZone = .outside
+        cachedToolbarSize = nil
         phase = .idle
         HotkeyFileLog.shared.log("overlay: dismissed")
     }
@@ -310,8 +345,26 @@ final class ScreenshotOverlay {
             onMouseMoved: { [weak self] in self?.handleMouseMoved($0) },
             onRightClick: { [weak self] in self?.cancel() },
             colorBadge: { [weak self] in self?.colorBadge },
+            selectionHandles: { [weak self] in
+                guard let self else { return false }
+                return self.phase == .toolbar && self.activeTool == nil
+            },
             cursor: { [weak self] in
-                self?.phase == .selecting ? Self.crosshairCursor : .arrow
+                guard let self else { return .arrow }
+                if self.phase == .selecting { return Self.crosshairCursor }
+                // 工具栏期无工具：调整手势与悬停区决定光标（缩放/开合手掌/箭头）
+                guard self.phase == .toolbar, self.activeTool == nil else { return .arrow }
+                if let gesture = self.selectionGesture {
+                    switch gesture {
+                    case .move: return .closedHand
+                    case .resize(let edges, _): return Self.resizeCursor(for: edges)
+                    }
+                }
+                switch self.toolbarHoverZone {
+                case .inside: return .openHand
+                case .border(let edges): return Self.resizeCursor(for: edges)
+                case .outside: return .arrow
+                }
             }
         )
         overlayView = view
@@ -366,15 +419,25 @@ final class ScreenshotOverlay {
 
     private func handleMouseDown(_ p: NSPoint) {
         // 工具栏期：激活了标注工具且点击在选区内 → 绘制；
-        // 无激活工具时点击选区/遮罩空白 = 放弃当前选区整体退出（微信式）
+        // 无工具时选区外空白 = 放弃当前选区整体退出（微信式）；
+        // 选区内/边/角起调整手势（纯点击无位移 = 无操作，防手滑丢掉整场标注）
         if phase == .toolbar {
             if let tool = activeTool {
-                // 工具激活期选区外点击忽略：防手一滑丢掉整个会话的标注（无工具时保留微信式取消）
+                // 工具激活期选区外点击忽略：防手一滑丢掉整个会话的标注
                 guard selectionRect.contains(p) else { return }
                 beginAnnotation(tool, at: p)
                 return
             }
-            cancel()
+            switch selectionZone(at: p) {
+            case .border(let edges):
+                selectionGesture = .resize(edges: edges, originalRect: selectionRect)
+                HotkeyFileLog.shared.log("overlay: resize arm edges=\(edges.rawValue)")
+            case .inside:
+                selectionGesture = .move(originalRect: selectionRect, startPoint: p)
+                HotkeyFileLog.shared.log("overlay: move arm")
+            case .outside:
+                cancel()
+            }
             return
         }
         guard phase == .selecting else { return }
@@ -387,7 +450,14 @@ final class ScreenshotOverlay {
 
     /// 悬停取色：只失效新旧徽标并集（全幅重绘在 5K 屏 60Hz 移动下不可接受，同拖拽策略）
     private func handleMouseMoved(_ p: NSPoint) {
-        guard phase == .selecting, dragStart == nil, let view = overlayView else { return }
+        guard let view = overlayView else { return }
+        // 工具栏期：更新悬停命中区驱动缩放/移动/箭头光标（视图每个 mouseMoved 都会 set 当前光标）
+        if phase == .toolbar {
+            guard activeTool == nil, selectionGesture == nil else { return }
+            toolbarHoverZone = selectionZone(at: p)
+            return
+        }
+        guard phase == .selecting, dragStart == nil else { return }
         let old = colorBadge
         guard let sample = sampledColor(at: p) else {
             if old != nil {
@@ -417,9 +487,13 @@ final class ScreenshotOverlay {
     }
 
     private func handleMouseDragged(_ p: NSPoint) {
-        // 工具栏期的拖拽是标注绘制（无绘制中标注则 no-op）
+        // 工具栏期：激活工具 = 标注绘制；无工具 = 选区调整（缩放/移动）
         if phase == .toolbar {
-            updateAnnotation(at: p)
+            if activeTool != nil {
+                updateAnnotation(at: p)
+            } else {
+                applySelectionGesture(at: p)
+            }
             return
         }
         guard phase == .selecting, let start = dragStart, let view = overlayView else { return }
@@ -431,20 +505,23 @@ final class ScreenshotOverlay {
             width: abs(p.x - start.x), height: abs(p.y - start.y)
         ))
         // 压暗层在选区首次出现（空 → 非空）时整体浮现，必须全幅失效一次；
-        // 之后压暗已铺满屏，只有选区边缘在动，失效新旧并集即可（外扩余量盖住
-        // 边框与尺寸提示）——全幅重绘在 5K 屏单帧 ~56MB，60Hz 拖拽不可接受
+        // 之后压暗已铺满屏，只有选区边缘在动，失效新旧并集即可——
+        // 全幅重绘在 5K 屏单帧 ~56MB，60Hz 拖拽不可接受
         if old.isEmpty {
             view.needsDisplay = true
         } else {
-            let dirty = old.union(selectionRect).insetBy(dx: -24, dy: -56)
-            view.setNeedsDisplay(view.bounds.intersection(dirty))
+            invalidateSelectionChange(old: old, new: selectionRect)
         }
     }
 
     private func handleMouseUp(_ p: NSPoint) {
-        // 工具栏期的松手是标注落库
+        // 工具栏期：激活工具 = 标注落库；无工具 = 调整手势收尾（纯点击本就无位移 = 无操作）
         if phase == .toolbar {
-            finishAnnotation(at: p)
+            if activeTool != nil {
+                finishAnnotation(at: p)
+            } else {
+                finishSelectionGesture(at: p)
+            }
             return
         }
         guard phase == .selecting else { return }
@@ -456,7 +533,100 @@ final class ScreenshotOverlay {
             cancel()
             return
         }
+        // 松手点就是工具栏期的首个悬停位置（在选区边缘，直接呈现缩放光标）
+        toolbarHoverZone = selectionZone(at: p)
         enterToolbarPhase()
+    }
+
+    // MARK: - 工具栏期选区调整（缩放 / 移动）
+
+    /// 光标处的选区命中区：角（8pt 方区，与手柄可视尺寸一致）优先，边（4pt 带）次之，
+    /// 其余按 containment；对边同中的极小选区退化为内部移动，避免手势歧义
+    private func selectionZone(at p: NSPoint) -> SelectionZone {
+        let sel = selectionRect
+        guard !sel.isEmpty else { return .outside }
+        let cornerBand: CGFloat = 8
+        let edgeBand: CGFloat = 4
+        var edges: SelectionEdges = []
+        if abs(p.x - sel.minX) <= cornerBand, abs(p.y - sel.minY) <= cornerBand { edges.insert(.minX); edges.insert(.minY) }
+        if abs(p.x - sel.maxX) <= cornerBand, abs(p.y - sel.minY) <= cornerBand { edges.insert(.maxX); edges.insert(.minY) }
+        if abs(p.x - sel.minX) <= cornerBand, abs(p.y - sel.maxY) <= cornerBand { edges.insert(.minX); edges.insert(.maxY) }
+        if abs(p.x - sel.maxX) <= cornerBand, abs(p.y - sel.maxY) <= cornerBand { edges.insert(.maxX); edges.insert(.maxY) }
+        if abs(p.x - sel.minX) <= edgeBand, p.y >= sel.minY, p.y <= sel.maxY { edges.insert(.minX) }
+        if abs(p.x - sel.maxX) <= edgeBand, p.y >= sel.minY, p.y <= sel.maxY { edges.insert(.maxX) }
+        if abs(p.y - sel.minY) <= edgeBand, p.x >= sel.minX, p.x <= sel.maxX { edges.insert(.minY) }
+        if abs(p.y - sel.maxY) <= edgeBand, p.x >= sel.minX, p.x <= sel.maxX { edges.insert(.maxY) }
+        if edges.contains(.minX) && edges.contains(.maxX) { return .inside }
+        if edges.contains(.minY) && edges.contains(.maxY) { return .inside }
+        if edges.isEmpty {
+            return sel.contains(p) ? .inside : .outside
+        }
+        return .border(edges)
+    }
+
+    private func applySelectionGesture(at p: NSPoint) {
+        guard let view = overlayView else { return }
+        let old = selectionRect
+        switch selectionGesture {
+        case .move(let original, let start):
+            var origin = NSPoint(x: original.minX + p.x - start.x, y: original.minY + p.y - start.y)
+            origin.x = min(max(origin.x, view.bounds.minX), view.bounds.maxX - original.width)
+            origin.y = min(max(origin.y, view.bounds.minY), view.bounds.maxY - original.height)
+            let new = NSRect(origin: origin, size: original.size)
+            guard new != old else { return }
+            // 已画标注跟随平移（按实际生效位移算，含贴边截断；移动手势仅在无工具时存在，无绘制中标注）
+            translateAnnotations(dx: new.minX - old.minX, dy: new.minY - old.minY)
+            selectionRect = new
+            invalidateSelectionChange(old: old, new: new)
+            placeToolbar()
+        case .resize(let edges, let original):
+            // 被拖边夹在屏幕边界与对边（减最小边长）之间：不翻转、不小于最小选区
+            var minX = original.minX, maxX = original.maxX
+            var minY = original.minY, maxY = original.maxY
+            let minSide = Self.minSelectionSide
+            if edges.contains(.minX) { minX = min(max(p.x, view.bounds.minX), original.maxX - minSide) }
+            if edges.contains(.maxX) { maxX = max(min(p.x, view.bounds.maxX), original.minX + minSide) }
+            if edges.contains(.minY) { minY = min(max(p.y, view.bounds.minY), original.maxY - minSide) }
+            if edges.contains(.maxY) { maxY = max(min(p.y, view.bounds.maxY), original.minY + minSide) }
+            let new = NSRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+            guard new != old else { return }
+            selectionRect = new
+            invalidateSelectionChange(old: old, new: new)
+            placeToolbar()
+        case .none:
+            break
+        }
+    }
+
+    private func finishSelectionGesture(at p: NSPoint) {
+        guard selectionGesture != nil else { return }
+        selectionGesture = nil
+        // 拖拽期间 hover 区不更新，按松手点重算，避免陈旧光标
+        toolbarHoverZone = selectionZone(at: p)
+        HotkeyFileLog.shared.log("overlay: adjust done sel=\(selectionRect)")
+    }
+
+    /// 移动选区时同步平移已提交标注（移动手势仅在无激活工具时存在）
+    private func translateAnnotations(dx: CGFloat, dy: CGFloat) {
+        guard dx != 0 || dy != 0 else { return }
+        for index in annotations.indices {
+            switch annotations[index].kind {
+            case .pen:
+                annotations[index].points = annotations[index].points.map {
+                    NSPoint(x: $0.x + dx, y: $0.y + dy)
+                }
+            case .rect, .mosaic:
+                annotations[index].rect = annotations[index].rect.offsetBy(dx: dx, dy: dy)
+            }
+        }
+    }
+
+    /// 选区几何变化的最小失效区：新旧并集外扩（盖住边框、手柄与尺寸徽标）；
+    /// 全幅重绘在 5K 屏单帧 ~56MB，拖拽 60Hz 下不可接受
+    private func invalidateSelectionChange(old: NSRect, new: NSRect) {
+        guard let view = overlayView else { return }
+        let dirty = old.union(new).insetBy(dx: -24, dy: -56)
+        view.setNeedsDisplay(view.bounds.intersection(dirty))
     }
 
     // MARK: - 工具栏
@@ -495,6 +665,7 @@ final class ScreenshotOverlay {
     /// 工具栏自然尺寸。零尺寸初始帧会让 SwiftUI HStack 进入压缩布局、fittingSize 量出
     /// 截断后的宽度——先给宽裕的临时帧再量，才能拿到文字完整展开的自然尺寸
     private func toolbarNaturalSize() -> NSSize {
+        if let cached = cachedToolbarSize { return cached }
         guard let panel = toolbarPanel,
               let hosting = panel.contentView as? NSHostingView<AnyView> else {
             return NSSize(width: 160, height: 40)
@@ -502,7 +673,9 @@ final class ScreenshotOverlay {
         hosting.frame = NSRect(origin: .zero, size: NSSize(width: 800, height: 100))
         hosting.layoutSubtreeIfNeeded()
         let fit = hosting.fittingSize
-        return NSSize(width: max(fit.width + 1, 150), height: max(fit.height, 32))
+        let size = NSSize(width: max(fit.width + 1, 150), height: max(fit.height, 32))
+        cachedToolbarSize = size
+        return size
     }
 
     /// 选区在全局屏幕坐标系里的框（遮罩 panel 的 frame 即所在屏 frame，视图铺满）
@@ -536,7 +709,8 @@ final class ScreenshotOverlay {
         activeTool = (activeTool == tool) ? nil : tool
         drawingAnnotation = nil
         toolbarModel?.activeTool = activeTool
-        // 激活笔迹类工具时色板展开/收起会改变工具栏宽度，重新测量摆放
+        // 激活笔迹类工具时色板展开/收起会改变工具栏宽度：失效尺寸缓存后重新测量摆放
+        cachedToolbarSize = nil
         placeToolbar()
         HotkeyFileLog.shared.log("overlay: tool \(activeTool.map { "\($0)" } ?? "none")")
     }
@@ -895,9 +1069,11 @@ final class ScreenshotOverlay {
         undoHotKeyRef = nil
     }
 
-    /// Carbon ⌘Z（id=6）派发入口。绘制中忽略，防「撤上一笔的同时正画新一笔」的状态交错
+    /// Carbon ⌘Z（id=6）派发入口。绘制中或选区调整中忽略：撤销失效区按当前选区算，
+    /// 手势拖动中的标注旧位置可能已在失效区外，会留鬼影
     func handleUndoHotKey() {
-        guard phase == .toolbar, !annotations.isEmpty, drawingAnnotation == nil else { return }
+        guard phase == .toolbar, !annotations.isEmpty, drawingAnnotation == nil,
+              selectionGesture == nil else { return }
         HotkeyFileLog.shared.log("overlay: undo (hotkey)")
         undoLastAnnotation()
     }
@@ -1021,6 +1197,66 @@ final class ScreenshotOverlay {
         image.isTemplate = false
         return NSCursor(image: image, hotSpot: NSPoint(x: 10, y: 10))
     }()
+
+    /// 斜向缩放光标：系统只提供横竖向，对角双箭头自绘（黑边白芯同十字线套路）
+    static let diagonalSlashCursor = makeDiagonalResizeCursor(arrowUpRight: true)
+    static let diagonalBackslashCursor = makeDiagonalResizeCursor(arrowUpRight: false)
+
+    /// 边集 → 缩放光标。斜向轴：minX+minY / maxX+maxY 角走「/」，另两角走「\」
+    private static func resizeCursor(for edges: SelectionEdges) -> NSCursor {
+        let horizontal = edges.contains(.minX) || edges.contains(.maxX)
+        let vertical = edges.contains(.minY) || edges.contains(.maxY)
+        switch (horizontal, vertical) {
+        case (true, false):
+            return .resizeLeftRight
+        case (false, true):
+            return .resizeUpDown
+        case (true, true):
+            let slash = (edges.contains(.minX) && edges.contains(.minY))
+                || (edges.contains(.maxX) && edges.contains(.maxY))
+            return slash ? diagonalSlashCursor : diagonalBackslashCursor
+        default:
+            return .arrow
+        }
+    }
+
+    private static func makeDiagonalResizeCursor(arrowUpRight: Bool) -> NSCursor {
+        let image = NSImage(size: NSSize(width: 21, height: 21), flipped: false) { _ in
+            let path = NSBezierPath()
+            path.lineCapStyle = .round
+            path.lineJoinStyle = .round
+            if arrowUpRight {
+                // 「/」轴：↗↙ 双向箭头（Cocoa y 轴向上）
+                path.move(to: NSPoint(x: 5.5, y: 5.5))
+                path.line(to: NSPoint(x: 15.5, y: 15.5))
+                path.move(to: NSPoint(x: 10.5, y: 15.5))
+                path.line(to: NSPoint(x: 15.5, y: 15.5))
+                path.line(to: NSPoint(x: 15.5, y: 10.5))
+                path.move(to: NSPoint(x: 10.5, y: 5.5))
+                path.line(to: NSPoint(x: 5.5, y: 5.5))
+                path.line(to: NSPoint(x: 5.5, y: 10.5))
+            } else {
+                // 「\」轴：↘↖ 双向箭头
+                path.move(to: NSPoint(x: 5.5, y: 15.5))
+                path.line(to: NSPoint(x: 15.5, y: 5.5))
+                path.move(to: NSPoint(x: 10.5, y: 5.5))
+                path.line(to: NSPoint(x: 15.5, y: 5.5))
+                path.line(to: NSPoint(x: 15.5, y: 10.5))
+                path.move(to: NSPoint(x: 10.5, y: 15.5))
+                path.line(to: NSPoint(x: 5.5, y: 15.5))
+                path.line(to: NSPoint(x: 5.5, y: 10.5))
+            }
+            path.lineWidth = 4
+            NSColor.black.setStroke()
+            path.stroke()
+            path.lineWidth = 2
+            NSColor.white.setStroke()
+            path.stroke()
+            return true
+        }
+        image.isTemplate = false
+        return NSCursor(image: image, hotSpot: NSPoint(x: 10.5, y: 10.5))
+    }
 }
 
 // MARK: - 遮罩窗口（borderless 面板默认不能成为 key——不重写就永远拿不到指针控制权）
@@ -1091,6 +1327,8 @@ private final class OverlayContentView: NSView {
     private var onMouseMoved: ((NSPoint) -> Void)?
     private var onRightClick: (() -> Void)?
     private var colorBadgeProvider: (() -> ColorBadge?)?
+    /// 工具栏期（无激活工具）才画 8 个调整手柄
+    private var selectionHandlesProvider: (() -> Bool)?
     private var cursorProvider: (() -> NSCursor)?
     private var currentCursor: NSCursor { cursorProvider?() ?? .arrow }
 
@@ -1104,6 +1342,7 @@ private final class OverlayContentView: NSView {
                    onMouseMoved: @escaping (NSPoint) -> Void,
                    onRightClick: @escaping () -> Void,
                    colorBadge: @escaping () -> ColorBadge?,
+                   selectionHandles: @escaping () -> Bool,
                    cursor: @escaping () -> NSCursor) {
         self.snapshotImage = snapshotImage
         self.pixelScale = pixelScale
@@ -1117,6 +1356,7 @@ private final class OverlayContentView: NSView {
         self.onMouseMoved = onMouseMoved
         self.onRightClick = onRightClick
         self.colorBadgeProvider = colorBadge
+        self.selectionHandlesProvider = selectionHandles
         self.cursorProvider = cursor
     }
 
@@ -1174,8 +1414,33 @@ private final class OverlayContentView: NSView {
             path.lineWidth = 1.5
             NSColor.controlAccentColor.setStroke()
             path.stroke()
+            // ④½ 工具栏期（无激活工具）画 8 个调整手柄，提示边/角可拖拽
+            if selectionHandlesProvider?() == true {
+                drawSelectionHandles(for: sel)
+            }
             // ⑤ 尺寸提示：选区下方 8pt 的黑底白字胶囊，贴底翻上方
             drawSizeBadge(for: sel)
+        }
+    }
+
+    /// 选区调整手柄：4 角 + 4 边中点，白底黑描边（深浅底都可见），与命中区视觉呼应
+    private func drawSelectionHandles(for sel: NSRect) {
+        let side: CGFloat = 8
+        let midX = sel.midX, midY = sel.midY
+        let points = [
+            NSPoint(x: sel.minX, y: sel.minY), NSPoint(x: sel.maxX, y: sel.minY),
+            NSPoint(x: sel.minX, y: sel.maxY), NSPoint(x: sel.maxX, y: sel.maxY),
+            NSPoint(x: midX, y: sel.minY), NSPoint(x: midX, y: sel.maxY),
+            NSPoint(x: sel.minX, y: midY), NSPoint(x: sel.maxX, y: midY)
+        ]
+        for point in points {
+            let rect = NSRect(x: point.x - side / 2, y: point.y - side / 2, width: side, height: side)
+            let path = NSBezierPath(roundedRect: rect, xRadius: 2, yRadius: 2)
+            NSColor.white.withAlphaComponent(0.95).setFill()
+            path.fill()
+            path.lineWidth = 1
+            NSColor.black.withAlphaComponent(0.45).setStroke()
+            path.stroke()
         }
     }
 

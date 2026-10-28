@@ -25,3 +25,4 @@ TODOS.md
 # Sparkle EdDSA 私钥（只应存在于 Keychain 与 GitHub Secrets，绝不入库）
 .secrets/
 sparkle_private_key
+.swiftpm
