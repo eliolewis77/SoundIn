@@ -22,6 +22,8 @@ struct ResultPanelHeader: View {
     let title: String
     let systemImage: String
     var onCopy: (() -> Void)?
+    /// 复制按钮是否带「复制」文字（false = 纯图标，图标随复制态切换为对勾）
+    var showsCopyText = true
     let onClose: () -> Void
     @State private var justCopied = false
 
@@ -36,14 +38,23 @@ struct ResultPanelHeader: View {
                     onCopy()
                     justCopied = true
                 } label: {
-                    Label(justCopied ? "已复制" : "复制", systemImage: justCopied ? "checkmark" : "doc.on.doc")
-                        .font(.system(size: 12, weight: .medium))
-                        .padding(.horizontal, 6)
-                        .frame(minHeight: 24)
-                        .contentShape(Rectangle())
+                    Group {
+                        if showsCopyText {
+                            Label(justCopied ? "已复制" : "复制",
+                                  systemImage: justCopied ? "checkmark" : "doc.on.doc")
+                                .padding(.horizontal, 6)
+                        } else {
+                            Image(systemName: justCopied ? "checkmark" : "doc.on.doc")
+                                .frame(width: 24)
+                        }
+                    }
+                    .font(.system(size: 12, weight: .medium))
+                    .frame(minHeight: 24)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(.secondary)
+                .accessibilityLabel(justCopied ? "已复制" : "复制")
             }
             Button(action: onClose) {
                 Image(systemName: "xmark.circle.fill")

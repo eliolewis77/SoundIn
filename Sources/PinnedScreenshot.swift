@@ -72,7 +72,8 @@ private final class PinnedScreenshotController: NSWindowController, NSWindowDele
         panel.contentMinSize = NSSize(width: min(24, size.width), height: min(24, size.height))
         panel.backgroundColor = .clear
         panel.isOpaque = false
-        panel.hasShadow = false
+        // 无边框钉图靠系统窗口阴影与背景区分
+        panel.hasShadow = true
         panel.contentView = PinnedScreenshotImageView(image: NSImage(cgImage: image, size: selectionFrame.size))
         let desired = panel.frameRect(forContentRect: NSRect(origin: selectionFrame.origin, size: size))
         panel.setFrame(PinnedScreenshotPlacement.clamp(desired, to: visibleFrame), display: false)
@@ -97,7 +98,7 @@ private final class PinnedScreenshotPanel: NSPanel {
     }
 }
 
-/// 无标题栏钉图：细边线区分背景，双击关闭，单击拖动，滚轮缩放。
+/// 无标题栏钉图：系统阴影区分背景，双击关闭，单击拖动，滚轮缩放。
 private final class PinnedScreenshotImageView: NSImageView {
     init(image: NSImage) {
         super.init(frame: .zero)
@@ -129,25 +130,6 @@ private final class PinnedScreenshotImageView: NSImageView {
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
     override var acceptsFirstResponder: Bool { true }
-
-    override func draw(_ dirtyRect: NSRect) {
-        super.draw(dirtyRect)
-        // 内外各一个物理像素，亮底和暗底都能辨认；只绘制在浮窗上，不写进截图。
-        let pixel = 1 / (window?.backingScaleFactor ?? 1)
-        let outer = NSBezierPath(rect: bounds.insetBy(dx: pixel / 2, dy: pixel / 2))
-        outer.lineWidth = pixel
-        NSColor.black.withAlphaComponent(0.6).setStroke()
-        outer.stroke()
-        let inner = NSBezierPath(rect: bounds.insetBy(dx: pixel * 1.5, dy: pixel * 1.5))
-        inner.lineWidth = pixel
-        NSColor.white.withAlphaComponent(0.8).setStroke()
-        inner.stroke()
-    }
-
-    override func viewDidChangeBackingProperties() {
-        super.viewDidChangeBackingProperties()
-        needsDisplay = true
-    }
 
     override func mouseDown(with event: NSEvent) {
         if event.clickCount >= 2 {

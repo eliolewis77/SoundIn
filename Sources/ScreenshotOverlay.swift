@@ -6,8 +6,8 @@ import UniformTypeIdentifiers
 
 // MARK: - 自建截图选区遮罩
 // 触发 → screencapture -x 静默抓冻结帧 → 全屏遮罩（压暗 + 冻结帧 + 白色十字光标）
-// → 拖拽选区（高亮 + 实时尺寸）→ 松手弹就地工具栏（文字识别 / 画笔 / 矩形 / 马赛克 /
-// 撤销 / 复制 / 保存到桌面），标注烘焙进复制与保存的输出图（OCR 用无标注干净图）。
+// → 拖拽选区（高亮 + 实时尺寸）→ 松手弹就地工具栏（画笔 / 矩形 / 马赛克 / 撤销 /
+// 关闭 / 文字识别 / 钉住 / 保存到桌面 / 复制），标注烘焙进复制与保存的输出图（OCR 用无标注干净图）。
 // 一期只做鼠标所在屏；直接替换 screencapture -i 系统 UI。
 // 生命周期：idle → snapshotting → selecting → toolbar → idle。
 // 工具栏期可拖 8 手柄（4 边 + 4 角）缩放选区、选区内拖动整体平移（已画标注跟随），
@@ -20,18 +20,25 @@ import UniformTypeIdentifiers
 
 /// 标注工具。工具栏按钮与 activeTool 的取值
 enum AnnotationTool {
-    case pen, rect, mosaic
+    case pen, rect, mosaic, text
 }
 
-/// 一个已提交/绘制中的标注操作。rect/mosaic 用 rect，pen 用 points。
+/// 一个已提交/绘制中的标注操作。rect/mosaic 用 rect，pen 用 points，text 用 text+point。
 /// colorIndex 指向 ScreenshotOverlay.annotationPalette——笔迹保留绘制时的颜色，
 /// 换色不回溯影响历史笔迹
 struct Annotation {
-    enum Kind { case pen, rect, mosaic }
+    enum Kind { case pen, rect, mosaic, text }
     var kind: Kind
     var points: [NSPoint] = []
     var rect: NSRect = .zero
     var colorIndex: Int = 0
+    var text: String = ""
+    /// 文本标注锚点（文本框左上角，视图局部坐标；文本向下方延展，视觉占 [point.y - 高, point.y]）
+    var point: NSPoint = .zero
+    /// 文本字号（逻辑点），每条文本保留创建时的字号
+    var fontSize: CGFloat = ScreenshotOverlay.defaultTextFontSize
+    /// 每条文本保留排版宽度，窄选区也按相同宽度预览、命中与导出。
+    var textWidth: CGFloat = ScreenshotOverlay.textMaxWidth
 }
 
 /// 渲染状态快照：overlay 是唯一事实源，视图 draw 时经 provider 读取（与 selectionProvider 同模式）
@@ -51,9 +58,9 @@ struct ColorBadge {
 }
 
 @MainActor
-final class ScreenshotOverlay {
+final class ScreenshotOverlay: NSObject, NSTextViewDelegate {
     static let shared = ScreenshotOverlay()
-    private init() {}
+    override private init() {}
 
     enum Phase: Equatable {
         case idle, snapshotting, selecting, toolbar
@@ -113,10 +120,29 @@ final class ScreenshotOverlay {
     private var drawingAnnotation: Annotation?
     private var drawingStart: NSPoint?
     /// 当前笔迹色的色板下标（笔迹类标注用；历史笔迹保留各自颜色）
-    private var annotationColorIndex = 0
+    private var annotationColorIndex = ScreenshotOverlay.defaultAnnotationColorIndex
     /// 整帧缩小版（马赛克源图），首次使用马赛克时惰性生成
     private var pixelatedImage: CGImage?
     private var toolbarModel: ToolbarModel?
+    /// 文本标注编辑框（隐藏的键盘/IME 接管视图，文字由遮罩画布直接渲染）
+    private var textEditor: TextEditorView?
+    /// 编辑中的文本草稿：随输入实时渲染在画布上（与提交后同一排版路径）
+    private var textDraft: Annotation?
+    /// 草稿色号（新文本跟随色板，重编辑沿用原色）
+    private var textDraftColorIndex = ScreenshotOverlay.defaultAnnotationColorIndex
+    /// 输入框锚点（文本框左上角），提交时落库
+    private var textLayoutWidth: CGFloat = ScreenshotOverlay.textMaxWidth
+    private var textAnchor: NSPoint = .zero
+    /// 当前编辑的已有文本标注下标（双击重编辑）；nil = 新文本
+    private var editingTextIndex: Int?
+    /// 新文本使用的字号（工具栏可选）
+    private var annotationFontSize: CGFloat = ScreenshotOverlay.defaultTextFontSize
+    /// 上一帧光标矩形（失效区计算用）
+    private var lastCaretRect: NSRect?
+    /// 文本标注拖拽（工具栏期：无工具或文本工具时按住文本可单独移位）
+    private var textDrag: (index: Int, original: NSPoint, start: NSPoint)?
+    /// 悬停命中的文本标注下标（驱动抓手光标；仅无工具/文本工具时更新）
+    private var textHoverIndex: Int?
     // 取色（选区悬停期）
     private var colorHotKeyRef: EventHotKeyRef?
     private var colorBadge: ColorBadge?
@@ -133,8 +159,48 @@ final class ScreenshotOverlay {
     static let annotationLineWidth: CGFloat = 3
     /// 马赛克块边长（逻辑点）：跨分辨率视觉一致
     static let mosaicBlockPoint: CGFloat = 12
-    /// 标注色板：默认主题蓝，其余为高频标注色
-    static let annotationPalette: [NSColor] = [.controlAccentColor, .systemRed, .systemYellow, .systemGreen]
+    /// 标注色板：下标 0 是红色（默认选中），其余为主题蓝/黄/绿
+    nonisolated static let annotationPalette: [NSColor] = [.systemRed, .controlAccentColor, .systemYellow, .systemGreen]
+    /// 默认笔迹色 = 色板下标 0（红色）
+    static let defaultAnnotationColorIndex = 0
+    /// 文本字号档位（微信式固定档），defaultTextFontSize 为新文本默认档
+    nonisolated static let textFontSizes: [CGFloat] = [14, 18, 24, 32]
+    nonisolated static let defaultTextFontSize: CGFloat = 18
+    /// 文本排版宽度上限（编辑预览、光标定位、提交渲染共用，保证所见即所得）
+    nonisolated static let textMaxWidth: CGFloat = 236
+
+    /// 文本标注属性：编辑预览与提交渲染共用一份
+    nonisolated static func textAttributes(colorIndex: Int, fontSize: CGFloat) -> [NSAttributedString.Key: Any] {
+        [
+            .font: NSFont.systemFont(ofSize: fontSize, weight: .regular),
+            .foregroundColor: annotationPalette[colorIndex % max(annotationPalette.count, 1)]
+        ]
+    }
+
+    /// 文本排版块尺寸。只做量测的入口，管线在函数内自持
+    nonisolated static func textBlockSize(text: String, colorIndex: Int, fontSize: CGFloat,
+                                     width: CGFloat = textMaxWidth) -> NSSize {
+        makeOwningLayout(text: text, colorIndex: colorIndex, fontSize: fontSize, width: width).blockSize
+    }
+
+    /// 自持排版管线：容器宽 = textMaxWidth、行片填充 0，与隐藏输入框的布局约束完全一致。
+    /// 容器内坐标 y 向下（TextKit 惯例），blockSize 即排版块尺寸。
+    /// NSTextStorage 必须随返回值保活：TextKit1 的 NSLayoutManager 不强引用 storage
+    /// （防循环保留），storage 释放即清字形缓存——此前返回值漏掉 storage，
+    /// drawGlyphs 在调用侧静默画空（「文本标注不可见」根因，2026-11-02 实测定位）
+    nonisolated static func makeOwningLayout(text: String, colorIndex: Int, fontSize: CGFloat,
+                                        width: CGFloat = textMaxWidth)
+        -> (storage: NSTextStorage, layoutManager: NSLayoutManager, container: NSTextContainer, blockSize: NSSize) {
+        let storage = NSTextStorage(string: text, attributes: textAttributes(colorIndex: colorIndex, fontSize: fontSize))
+        let layoutManager = NSLayoutManager()
+        storage.addLayoutManager(layoutManager)
+        let container = NSTextContainer(size: NSSize(width: max(1, width), height: CGFloat.greatestFiniteMagnitude))
+        container.lineFragmentPadding = 0
+        layoutManager.addTextContainer(container)
+        layoutManager.ensureLayout(for: container)
+        let used = layoutManager.usedRect(for: container)
+        return (storage, layoutManager, container, NSSize(width: ceil(used.maxX), height: ceil(used.maxY)))
+    }
     /// ⌥ 保存面板记住的上次目录（无沙盒，直接存路径）
     private static let lastSaveDirKey = "screenshot.lastSaveDir"
     /// 取色 1×1 采样上下文：sRGB 读数（HEX 惯例），复用避免每次 mouseMoved 重建
@@ -161,7 +227,13 @@ final class ScreenshotOverlay {
         drawingAnnotation = nil
         drawingStart = nil
         pixelatedImage = nil
-        annotationColorIndex = 0
+        annotationColorIndex = Self.defaultAnnotationColorIndex
+        annotationFontSize = Self.defaultTextFontSize
+        editingTextIndex = nil
+        textDrag = nil
+        textHoverIndex = nil
+        textDraft = nil
+        lastCaretRect = nil
         unregisterUndoHotKey()
         unregisterColorHotKey()
         colorBadge = nil
@@ -193,6 +265,7 @@ final class ScreenshotOverlay {
         // 幂等：退出路径上 terminationHandler 可能再跑一次 snapshotFailed → dismiss，
         // 二次 NSCursor.pop() 会打乱光标栈
         guard phase != .idle else { return }
+        endTextEditing(commit: false)
         snapshotProcess?.terminate()
         snapshotProcess = nil
         watchdogTask?.cancel()
@@ -227,8 +300,12 @@ final class ScreenshotOverlay {
         activeTool = nil
         drawingAnnotation = nil
         drawingStart = nil
-        annotationColorIndex = 0
+        annotationColorIndex = Self.defaultAnnotationColorIndex
         colorBadge = nil
+        textDrag = nil
+        textHoverIndex = nil
+        textDraft = nil
+        lastCaretRect = nil
         toolbarModel = nil
         selectionRect = .zero
         dragStart = nil
@@ -327,24 +404,32 @@ final class ScreenshotOverlay {
             selectionProvider: { [weak self] in self?.selectionRect ?? .zero },
             pixelRectProvider: { [weak self] in self?.pixelRect(for: $0) },
             annotationState: { [weak self] in
-                guard let self, !self.annotations.isEmpty || self.drawingAnnotation != nil else { return nil }
+                guard let self,
+                      !self.annotations.isEmpty || self.drawingAnnotation != nil || self.textDraft != nil else { return nil }
+                // 双击重编辑期间隐藏原文：避免与画布草稿叠成两份
+                var committed = self.annotations.enumerated().compactMap { offset, element -> Annotation? in
+                    offset == self.editingTextIndex ? nil : element
+                }
+                // 编辑中的草稿与已提交标注同路径渲染（所见即所得）
+                if let draft = self.textDraft { committed.append(draft) }
                 // 马赛克标注在场才生成/保留像素化帧（惰性）
-                let needsMosaic = self.annotations.contains { $0.kind == .mosaic }
+                let needsMosaic = committed.contains { $0.kind == .mosaic }
                     || (self.drawingAnnotation?.kind == .mosaic)
                 if needsMosaic { self.pixelatedFrameIfNeeded() }
                 return AnnotationRenderState(
-                    committed: self.annotations,
+                    committed: committed,
                     drawing: self.drawingAnnotation,
                     pixelated: self.pixelatedImage,
                     palette: Self.annotationPalette
                 )
             },
-            onMouseDown: { [weak self] in self?.handleMouseDown($0) },
+            onMouseDown: { [weak self] in self?.handleMouseDown($0, clickCount: $1) },
             onMouseDragged: { [weak self] in self?.handleMouseDragged($0) },
             onMouseUp: { [weak self] in self?.handleMouseUp($0) },
             onMouseMoved: { [weak self] in self?.handleMouseMoved($0) },
             onRightClick: { [weak self] in self?.cancel() },
             colorBadge: { [weak self] in self?.colorBadge },
+            textEditing: { [weak self] in self?.currentTextEditingOverlay() },
             selectionHandles: { [weak self] in
                 guard let self else { return false }
                 return self.phase == .toolbar && self.activeTool == nil
@@ -352,8 +437,15 @@ final class ScreenshotOverlay {
             cursor: { [weak self] in
                 guard let self else { return .arrow }
                 if self.phase == .selecting { return Self.crosshairCursor }
-                // 工具栏期无工具：调整手势与悬停区决定光标（缩放/开合手掌/箭头）
-                guard self.phase == .toolbar, self.activeTool == nil else { return .arrow }
+                // 工具栏期：文本拖拽/悬停 > 文本工具 I 形；无工具时调整手势与悬停区
+                // 决定光标（缩放/开合手掌/箭头）
+                guard self.phase == .toolbar else { return .arrow }
+                if self.textDrag != nil { return .closedHand }
+                if let tool = self.activeTool {
+                    if self.textHoverIndex != nil { return .openHand }
+                    return tool == .text && self.toolbarHoverZone == .inside ? NSCursor.iBeam : .arrow
+                }
+                if self.textHoverIndex != nil { return .openHand }
                 if let gesture = self.selectionGesture {
                     switch gesture {
                     case .move: return .closedHand
@@ -417,14 +509,31 @@ final class ScreenshotOverlay {
 
     // MARK: - 鼠标（由 OverlayContentView 回调，视图局部坐标）
 
-    private func handleMouseDown(_ p: NSPoint) {
+    private func handleMouseDown(_ p: NSPoint, clickCount: Int) {
         // 工具栏期：激活了标注工具且点击在选区内 → 绘制；
         // 无工具时选区外空白 = 放弃当前选区整体退出（微信式）；
         // 选区内/边/角起调整手势（纯点击无位移 = 无操作，防手滑丢掉整场标注）
         if phase == .toolbar {
+            // 先提交输入，再让同一次点击继续命中文本或创建下一段文字。
+            if textEditor != nil {
+                endTextEditing(commit: true)
+            }
             if let tool = activeTool {
                 // 工具激活期选区外点击忽略：防手一滑丢掉整个会话的标注
                 guard selectionRect.contains(p) else { return }
+                if tool == .text {
+                    if clickCount >= 2, let index = textAnnotationIndex(at: p) {
+                        beginTextEditing(existing: index)
+                    } else if let index = textAnnotationIndex(at: p) {
+                        // 按住已提交文本 = 拖拽移位
+                        textDrag = (index, annotations[index].point, p)
+                    } else {
+                        beginTextEditing(anchor: p, initialText: "",
+                                         fontSize: annotationFontSize,
+                                         colorIndex: annotationColorIndex, editingIndex: nil)
+                    }
+                    return
+                }
                 beginAnnotation(tool, at: p)
                 return
             }
@@ -433,8 +542,16 @@ final class ScreenshotOverlay {
                 selectionGesture = .resize(edges: edges, originalRect: selectionRect)
                 HotkeyFileLog.shared.log("overlay: resize arm edges=\(edges.rawValue)")
             case .inside:
-                selectionGesture = .move(originalRect: selectionRect, startPoint: p)
-                HotkeyFileLog.shared.log("overlay: move arm")
+                if clickCount >= 2, let index = textAnnotationIndex(at: p) {
+                    // 双击已提交文本：重编辑
+                    beginTextEditing(existing: index)
+                } else if let index = textAnnotationIndex(at: p) {
+                    // 文本标注优先于整体移动：按住文本单独移位
+                    textDrag = (index, annotations[index].point, p)
+                } else {
+                    selectionGesture = .move(originalRect: selectionRect, startPoint: p)
+                    HotkeyFileLog.shared.log("overlay: move arm")
+                }
             case .outside:
                 cancel()
             }
@@ -451,10 +568,11 @@ final class ScreenshotOverlay {
     /// 悬停取色：只失效新旧徽标并集（全幅重绘在 5K 屏 60Hz 移动下不可接受，同拖拽策略）
     private func handleMouseMoved(_ p: NSPoint) {
         guard let view = overlayView else { return }
-        // 工具栏期：更新悬停命中区驱动缩放/移动/箭头光标（视图每个 mouseMoved 都会 set 当前光标）
+        // 工具栏期：更新悬停命中区驱动光标（文本工具也需要最新命中区切换 I 形/箭头）
         if phase == .toolbar {
-            guard activeTool == nil, selectionGesture == nil else { return }
+            guard selectionGesture == nil, textDrag == nil else { return }
             toolbarHoverZone = selectionZone(at: p)
+            textHoverIndex = (activeTool == nil || activeTool == .text) ? textAnnotationIndex(at: p) : nil
             return
         }
         guard phase == .selecting, dragStart == nil else { return }
@@ -487,8 +605,12 @@ final class ScreenshotOverlay {
     }
 
     private func handleMouseDragged(_ p: NSPoint) {
-        // 工具栏期：激活工具 = 标注绘制；无工具 = 选区调整（缩放/移动）
+        // 工具栏期：文本拖拽 > 标注绘制 > 选区调整（缩放/移动）
         if phase == .toolbar {
+            if textDrag != nil {
+                applyTextDrag(at: p)
+                return
+            }
             if activeTool != nil {
                 updateAnnotation(at: p)
             } else {
@@ -515,8 +637,15 @@ final class ScreenshotOverlay {
     }
 
     private func handleMouseUp(_ p: NSPoint) {
-        // 工具栏期：激活工具 = 标注落库；无工具 = 调整手势收尾（纯点击本就无位移 = 无操作）
+        // 工具栏期：文本拖拽收尾；激活工具 = 标注落库；无工具 = 调整手势收尾（纯点击本就无位移 = 无操作）
         if phase == .toolbar {
+            if textDrag != nil {
+                applyTextDrag(at: p)
+                textDrag = nil
+                handleMouseMoved(p)
+                HotkeyFileLog.shared.log("overlay: text drag done")
+                return
+            }
             if activeTool != nil {
                 finishAnnotation(at: p)
             } else {
@@ -617,6 +746,9 @@ final class ScreenshotOverlay {
                 }
             case .rect, .mosaic:
                 annotations[index].rect = annotations[index].rect.offsetBy(dx: dx, dy: dy)
+            case .text:
+                annotations[index].point = NSPoint(x: annotations[index].point.x + dx,
+                                                   y: annotations[index].point.y + dy)
             }
         }
     }
@@ -652,9 +784,11 @@ final class ScreenshotOverlay {
             onCopy: { [weak self] in self?.copyToPasteboard() },
             onSave: { [weak self] in self?.saveToDesktop() },
             onPin: { [weak self] in self?.pinSelection() },
+            onCancel: { [weak self] in self?.cancel() },
             onToggleTool: { [weak self] in self?.toggleTool($0) },
             onUndo: { [weak self] in self?.undoLastAnnotation() },
-            onSetColor: { [weak self] in self?.setAnnotationColor($0) }
+            onSetColor: { [weak self] in self?.setAnnotationColor($0) },
+            onSetFontSize: { [weak self] in self?.setAnnotationFontSize($0) }
         )
         panel.contentView = NSHostingView(rootView: AnyView(view))
         panel.orderFrontRegardless()
@@ -706,6 +840,7 @@ final class ScreenshotOverlay {
     // MARK: - 标注
 
     private func toggleTool(_ tool: AnnotationTool) {
+        endTextEditing(commit: true)
         activeTool = (activeTool == tool) ? nil : tool
         drawingAnnotation = nil
         toolbarModel?.activeTool = activeTool
@@ -715,12 +850,296 @@ final class ScreenshotOverlay {
         HotkeyFileLog.shared.log("overlay: tool \(activeTool.map { "\($0)" } ?? "none")")
     }
 
-    /// 选色只影响后续笔迹（历史笔迹保留各自颜色），布局不变无需重摆
+    /// 选色只影响后续笔迹（历史笔迹保留各自颜色），布局不变无需重摆。
+    /// 编辑中的新文本草稿实时换色；双击重编辑沿用原色号不受影响
     private func setAnnotationColor(_ index: Int) {
         guard Self.annotationPalette.indices.contains(index) else { return }
         annotationColorIndex = index
         toolbarModel?.colorIndex = index
+        if textEditor != nil, editingTextIndex == nil {
+            textDraftColorIndex = index
+            refreshTextDraft()
+        }
         overlayView?.setNeedsDisplay(selectionRect.insetBy(dx: -6, dy: -6))
+    }
+
+    /// 换字号只影响后续文本，布局不变无需重摆。编辑中的草稿与隐藏编辑器实时跟随：
+    /// 两者字号不一致时画布文字按新字号排版、光标/换行仍按旧字号的布局算，会错位
+    /// （重编辑也跟随——提交时本来就采用新字号，且编辑框 frame 由 refreshTextDraft 同步）
+    private func setAnnotationFontSize(_ size: CGFloat) {
+        guard ScreenshotOverlay.textFontSizes.contains(size) else { return }
+        annotationFontSize = size
+        toolbarModel?.fontSize = size
+        if let editor = textEditor {
+            editor.font = NSFont.systemFont(ofSize: size, weight: .regular)
+            refreshTextDraft()
+        }
+    }
+
+    // MARK: 文本标注
+
+    /// 微信式文本编辑：文字直接渲染在画布上（与提交后同一排版路径，所见即所得），
+    /// 光标自绘、编辑区用虚线边框标记；隐藏的 TextEditorView 只负责键盘/IME/撤销。
+    /// Enter 换行、点击空白完成、Esc 丢弃、双击已提交文本可重编辑
+    private func beginTextEditing(anchor rawAnchor: NSPoint, initialText: String,
+                                  fontSize: CGFloat, colorIndex: Int, editingIndex: Int?,
+                                  layoutWidth: CGFloat? = nil) {
+        guard let view = overlayView else { return }
+        endTextEditing(commit: true)
+        textDrag = nil
+        selectionGesture = nil
+        drawingAnnotation = nil
+        annotationFontSize = fontSize
+        textLayoutWidth = max(1, min(layoutWidth ?? Self.textMaxWidth, selectionRect.width))
+        textDraftColorIndex = colorIndex
+        toolbarModel?.fontSize = fontSize
+        // 鼠标 I 形光标的热点在中心；文本锚点却在块顶。新建时补上半行高度，
+        // 使插入光标中心对准点击位置。重编辑直接沿用原锚点，避免每次编辑上移。
+        let lineHeight = fontSize + 4
+        let anchor = editingIndex == nil
+            ? NSPoint(x: rawAnchor.x, y: rawAnchor.y + lineHeight / 2)
+            : rawAnchor
+        // 宽度取 0，避免窄选区将尚未输入的光标挤到左边；输入后再按实际块尺寸夹取。
+        let p = clampedTextAnchor(anchor, size: NSSize(width: 0, height: lineHeight))
+        textAnchor = p
+        editingTextIndex = editingIndex
+        let editor = TextEditorView(frame: NSRect(x: p.x, y: p.y - (fontSize + 4),
+                                                  width: textLayoutWidth + 4, height: fontSize + 4))
+        // 布局约束与画布排版（makeTextLayout）完全一致：容器宽/行片填充/零内边距
+        editor.textContainerInset = .zero
+        editor.textContainer?.containerSize = NSSize(width: textLayoutWidth,
+                                                     height: CGFloat.greatestFiniteMagnitude)
+        editor.textContainer?.lineFragmentPadding = 0
+        editor.isVerticallyResizable = false
+        editor.isHorizontallyResizable = false
+        editor.isRichText = false
+        editor.allowsUndo = true
+        editor.isAutomaticQuoteSubstitutionEnabled = false
+        editor.isAutomaticDashSubstitutionEnabled = false
+        editor.isAutomaticTextReplacementEnabled = false
+        editor.drawsBackground = false
+        editor.wantsLayer = true
+        editor.layer?.masksToBounds = true
+        // 编辑框完全不可见：文字/光标由遮罩画布渲染，这里只做键盘与 IME 接管。
+        // 字号必须与画布排版一致，光标定位/换行才对得上
+        editor.font = NSFont.systemFont(ofSize: fontSize, weight: .regular)
+        editor.textColor = .clear
+        editor.insertionPointColor = .clear
+        editor.selectedTextAttributes = [:]
+        editor.string = initialText
+        editor.setSelectedRange(NSRange(location: (initialText as NSString).length, length: 0))
+        editor.delegate = self
+        editor.onCancel = { [weak self] in self?.endTextEditing(commit: false) }
+        view.addSubview(editor)
+        textEditor = editor
+        if let idx = editingIndex, annotations.indices.contains(idx) {
+            // 隐藏原文需主动失效其区域：旧像素不会自己消失
+            overlayView?.setNeedsDisplay(annotationBounds(annotations[idx]).insetBy(dx: -8, dy: -8))
+        }
+        refreshTextDraft()
+        // 文本编辑器接管键盘期间必须卸掉 Carbon Esc/⌘Z：热键抢在 IME 组合与文本撤销之前吃键
+        unregisterEscHotKey()
+        unregisterUndoHotKey()
+        view.window?.makeFirstResponder(editor)
+        HotkeyFileLog.shared.log("overlay: text editor spawn at (\(Int(p.x)), \(Int(p.y))) editing=\(editingIndex.map(String.init) ?? "new")")
+    }
+
+    /// 输入/光标变化 → 重画画布草稿与光标
+    func textDidChange(_ notification: Notification) {
+        refreshTextDraft()
+    }
+
+    func textViewDidChangeSelection(_ notification: Notification) {
+        refreshTextDraft()
+    }
+
+    /// 依据隐藏输入框的当前内容/选区刷新画布草稿与光标（失效旧新并集）。
+    /// 锚点随当前块尺寸实时回夹：草稿增长越界时整体滑移保持可见（提交夹取成为无操作，
+    /// 所见即所得不跳变）；高度兜底取 fontSize+4，空文本→首字符的块高跳变不牵动锚点
+    private func refreshTextDraft() {
+        guard let editor = textEditor else { return }
+        let oldBounds = textDraft.map { annotationBounds($0).insetBy(dx: -8, dy: -8) }
+        let oldCaret = lastCaretRect
+        let draftSize = ScreenshotOverlay.textBlockSize(text: editor.string, colorIndex: textDraftColorIndex,
+                                                        fontSize: annotationFontSize, width: textLayoutWidth)
+        textAnchor = clampedTextAnchor(
+            textAnchor,
+            size: NSSize(width: draftSize.width, height: max(draftSize.height, annotationFontSize + 4)))
+        let draft = Annotation(kind: .text, colorIndex: textDraftColorIndex,
+                               text: editor.string, point: textAnchor,
+                               fontSize: annotationFontSize, textWidth: textLayoutWidth)
+        textDraft = draft
+        // 编辑框顶边跟随回夹后的锚点：IME 候选窗定位走编辑框自身布局，不跟会漂移
+        editor.frame = NSRect(x: textAnchor.x, y: textAnchor.y - (annotationFontSize + 4),
+                              width: textLayoutWidth + 4, height: annotationFontSize + 4)
+        lastCaretRect = currentTextCaretRect()?.rect
+        var dirty = annotationBounds(draft).insetBy(dx: -8, dy: -8)
+        if let oldBounds { dirty = dirty.union(oldBounds) }
+        if let oldCaret { dirty = dirty.union(oldCaret.insetBy(dx: -8, dy: -8)) }
+        if let caret = lastCaretRect { dirty = dirty.union(caret.insetBy(dx: -8, dy: -8)) }
+        overlayView?.setNeedsDisplay(dirty)
+    }
+
+    /// 插入光标在遮罩视图坐标里的矩形（锚点 = 文本块左上角；容器内 y 向下）。
+    /// 用自持 TextKit1 管线重排而不是编辑器的 layoutManager：Tahoe 上 NSTextView 是
+    /// TextKit2 兼容 shim，字形 API 返回容器宽占位矩形（实测光标漂到全宽 236 处）；
+    /// 纯文本单字体下两者几何一致（同容器宽/行片填充/字号），自持管线字形可靠
+    private func currentTextCaretRect() -> (rect: NSRect, color: NSColor)? {
+        guard let editor = textEditor else { return nil }
+        let color = Self.annotationPalette[textDraftColorIndex % Self.annotationPalette.count]
+        let nsText = editor.string as NSString
+        let charIndex = min(editor.selectedRange().location, nsText.length)
+        let lineHeight = annotationFontSize + 4
+        let caret: NSRect
+        if nsText.length == 0 {
+            caret = NSRect(x: 0, y: 0, width: 1.5, height: lineHeight)
+        } else {
+            let layout = Self.makeOwningLayout(text: editor.string, colorIndex: textDraftColorIndex,
+                                               fontSize: annotationFontSize, width: textLayoutWidth)
+            defer { withExtendedLifetime(layout.storage) {} }
+            let lm = layout.layoutManager
+            if charIndex >= nsText.length, nsText.hasSuffix("\n") {
+                // 行尾换行后的空新行：贴容器左缘，位于已排版块底部（usedRect 不含末尾空行）
+                caret = NSRect(x: 0, y: layout.blockSize.height, width: 1.5, height: lineHeight)
+            } else {
+                let char = min(charIndex, nsText.length - 1)
+                let glyph = min(lm.glyphIndexForCharacter(at: char), max(0, lm.numberOfGlyphs - 1))
+                var lineRange = NSRange()
+                let lineFragment = lm.lineFragmentRect(forGlyphAt: glyph, effectiveRange: &lineRange)
+                if charIndex >= nsText.length {
+                    // 行尾插入：贴在本行右缘
+                    let usedLine = lm.lineFragmentUsedRect(forGlyphAt: glyph, effectiveRange: nil)
+                    caret = NSRect(x: usedLine.maxX, y: lineFragment.minY,
+                                   width: 1.5, height: lineFragment.height)
+                } else {
+                    let location = lm.location(forGlyphAt: glyph)
+                    caret = NSRect(x: lineFragment.minX + location.x, y: lineFragment.minY,
+                                   width: 1.5, height: lineFragment.height)
+                }
+            }
+        }
+        // 容器坐标（y 向下，原点块左上）→ 遮罩视图坐标（y 向上，原点 = textAnchor）
+        return (NSRect(x: textAnchor.x + caret.minX, y: textAnchor.y - caret.maxY,
+                       width: max(1.5, caret.width), height: caret.height), color)
+    }
+
+    /// 编辑中的画布覆盖物：光标矩形/颜色 + 虚线边框（遮罩视图坐标）
+    private func currentTextEditingOverlay() -> (caret: NSRect, caretColor: NSColor, draftBorder: NSRect)? {
+        guard textEditor != nil, let draft = textDraft, let view = overlayView else { return nil }
+        guard let caret = currentTextCaretRect() else { return nil }
+        // 空文本的排版块为零高；框住文字与插入光标的并集，空行、末尾换行也不越框。
+        let border = annotationBounds(draft).union(caret.rect)
+            .insetBy(dx: -5, dy: -4).intersection(view.bounds)
+        guard !border.isEmpty else { return nil }
+        return (caret.rect, caret.color, border)
+    }
+
+    /// 结束文本输入。commit=false 丢弃（Esc/会话关闭）；空的新文本视为误触不落库，
+    /// 重编辑被清空 = 删除该标注；重编辑路径原地替换（保留色号），新文本用当前色号/字号落库
+    private func endTextEditing(commit: Bool) {
+        guard let editor = textEditor else { return }
+        textEditor = nil
+        editor.delegate = nil
+        let text = editor.string
+        let usedFontSize = annotationFontSize
+        let anchorAtEdit = textAnchor
+        let indexBeingEdited = editingTextIndex
+        editingTextIndex = nil
+        // 擦除草稿与光标
+        if let draft = textDraft {
+            overlayView?.setNeedsDisplay(annotationBounds(draft).insetBy(dx: -8, dy: -8))
+        }
+        if let caret = lastCaretRect {
+            overlayView?.setNeedsDisplay(caret.insetBy(dx: -8, dy: -8))
+        }
+        textDraft = nil
+        lastCaretRect = nil
+        editor.removeFromSuperview()
+        overlayPanel?.makeFirstResponder(overlayView)
+        // 恢复键盘接管：Esc 常驻；⌘Z 保持懒注册语义（有可撤标注才接管）
+        registerEscHotKey()
+        if !annotations.isEmpty { registerUndoHotKey() }
+        guard commit else {
+            // 丢弃（含重编辑取消）：被隐藏的原文要画回来
+            if let index = indexBeingEdited, annotations.indices.contains(index) {
+                overlayView?.setNeedsDisplay(annotationBounds(annotations[index]).insetBy(dx: -8, dy: -8))
+            }
+            return
+        }
+        if text.isEmpty {
+            // 空的新文本仍是误触不落库；重编辑被清空 = 删除该标注（删后下标位移，悬停命中一并作废）
+            if let index = indexBeingEdited, annotations.indices.contains(index) {
+                let old = annotationBounds(annotations[index])
+                annotations.remove(at: index)
+                textHoverIndex = nil
+                if annotations.isEmpty {
+                    unregisterUndoHotKey()
+                    toolbarModel?.canUndo = false
+                }
+                overlayView?.setNeedsDisplay(old.insetBy(dx: -8, dy: -8))
+                HotkeyFileLog.shared.log("overlay: text #\(index) removed (cleared)")
+            }
+            return
+        }
+        if let index = indexBeingEdited, annotations.indices.contains(index) {
+            let old = annotationBounds(annotations[index])
+            let newSize = ScreenshotOverlay.textBlockSize(text: text, colorIndex: annotations[index].colorIndex,
+                                                          fontSize: usedFontSize, width: textLayoutWidth)
+            annotations[index].text = text
+            annotations[index].fontSize = usedFontSize
+            annotations[index].textWidth = textLayoutWidth
+            annotations[index].point = clampedTextAnchor(anchorAtEdit, size: newSize)
+            invalidateAnnotationChange(oldB: old, newB: annotationBounds(annotations[index]))
+            HotkeyFileLog.shared.log("overlay: text re-edited #\(index) (\(text.count) chars)")
+        } else {
+            // 按最终文本尺寸夹回选区（渲染会裁剪在选区内，编辑预览不会——不夹则贴边时首行被裁）
+            let newSize = ScreenshotOverlay.textBlockSize(text: text, colorIndex: annotationColorIndex,
+                                                          fontSize: usedFontSize, width: textLayoutWidth)
+            let anchor = clampedTextAnchor(anchorAtEdit, size: newSize)
+            let annotation = Annotation(kind: .text, colorIndex: annotationColorIndex,
+                                        text: text, point: anchor, fontSize: usedFontSize, textWidth: textLayoutWidth)
+            annotations.append(annotation)
+            if annotations.count == 1 { registerUndoHotKey() }
+            toolbarModel?.canUndo = true
+            overlayView?.setNeedsDisplay(annotationBounds(annotation).insetBy(dx: -8, dy: -8))
+            HotkeyFileLog.shared.log("overlay: text committed (\(text.count) chars)")
+        }
+    }
+
+    /// 双击重编辑：编辑框回到原文位置，预填内容并沿用原字号/色号
+    private func beginTextEditing(existing index: Int) {
+        guard annotations.indices.contains(index) else { return }
+        let annotation = annotations[index]
+        beginTextEditing(anchor: annotation.point, initialText: annotation.text,
+                         fontSize: annotation.fontSize, colorIndex: annotation.colorIndex,
+                         editingIndex: index, layoutWidth: annotation.textWidth)
+    }
+
+    /// 文本框（锚点 = 左上角，向下延展）尽量夹进选区：保证首行不被选区上缘裁掉；
+    /// 文本大于选区时退化为贴左/贴上
+    private func clampedTextAnchor(_ p: NSPoint, size: NSSize) -> NSPoint {
+        let sel = selectionRect
+        let x = min(max(p.x, sel.minX), max(sel.minX, sel.maxX - size.width))
+        let y = min(max(p.y, sel.minY + size.height), max(sel.minY + size.height, sel.maxY))
+        return NSPoint(x: x, y: y)
+    }
+
+    /// 最上层命中的文本标注下标（4pt 抓取余量）；未命中返回 nil
+    private func textAnnotationIndex(at p: NSPoint) -> Int? {
+        for (index, a) in annotations.enumerated().reversed() where a.kind == .text {
+            if annotationBounds(a).insetBy(dx: -4, dy: -4).contains(p) { return index }
+        }
+        return nil
+    }
+
+    /// 文本标注拖拽中：按位移增量移动（original + delta），文本框尽量留在选区内
+    private func applyTextDrag(at p: NSPoint) {
+        guard let drag = textDrag, annotations.indices.contains(drag.index) else { return }
+        let old = annotationBounds(annotations[drag.index])
+        let dx = p.x - drag.start.x, dy = p.y - drag.start.y
+        annotations[drag.index].point = clampedTextAnchor(
+            NSPoint(x: drag.original.x + dx, y: drag.original.y + dy), size: old.size)
+        invalidateAnnotationChange(oldB: old, newB: annotationBounds(annotations[drag.index]))
     }
 
     private func beginAnnotation(_ tool: AnnotationTool, at rawPoint: NSPoint) {
@@ -730,6 +1149,7 @@ final class ScreenshotOverlay {
         case .pen: drawingAnnotation = Annotation(kind: .pen, points: [p], colorIndex: annotationColorIndex)
         case .rect: drawingAnnotation = Annotation(kind: .rect, rect: NSRect(origin: p, size: .zero), colorIndex: annotationColorIndex)
         case .mosaic: drawingAnnotation = Annotation(kind: .mosaic, rect: NSRect(origin: p, size: .zero))
+        case .text: break  // 文本不走拖拽绘制，mouseDown 里单独走输入框路径
         }
     }
 
@@ -746,6 +1166,8 @@ final class ScreenshotOverlay {
             guard let start = drawingStart else { return }
             drawing.rect = NSRect(x: min(start.x, p.x), y: min(start.y, p.y),
                                   width: abs(p.x - start.x), height: abs(p.y - start.y))
+        case .text:
+            return
         }
         drawingAnnotation = drawing
         invalidateAnnotationChange(oldB: old, newB: annotationBounds(drawing))
@@ -770,6 +1192,8 @@ final class ScreenshotOverlay {
                 drawingAnnotation = nil
                 return
             }
+        case .text:
+            return
         }
         annotations.append(drawing)
         drawingAnnotation = nil
@@ -801,6 +1225,11 @@ final class ScreenshotOverlay {
             return r
         case .rect, .mosaic:
             return a.rect
+        case .text:
+            let size = ScreenshotOverlay.textBlockSize(text: a.text, colorIndex: a.colorIndex, fontSize: a.fontSize, width: a.textWidth)
+            // 锚点是文本块左上角，块体向下延展（Cocoa y 轴向上）
+            return NSRect(x: a.point.x, y: a.point.y - size.height,
+                          width: size.width, height: size.height)
         }
     }
 
@@ -899,7 +1328,8 @@ final class ScreenshotOverlay {
     }
 
     private func copyToPasteboard() {
-        // 复制/保存带标注（烘焙失败兜底干净图，不因标注丢功能）
+        // 复制/保存带标注（烘焙失败兜底干净图，不因标注丢功能）；正在输入的文本先落库
+        endTextEditing(commit: true)
         guard phase == .toolbar, let cgImage = annotatedSelectionImage() ?? croppedSelectionImage() else { dismiss(); return }
         let anchor = globalSelectionCenter()
         let rep = NSBitmapImageRep(cgImage: cgImage)
@@ -920,6 +1350,7 @@ final class ScreenshotOverlay {
 
     private func pinSelection() {
         guard phase == .toolbar else { return }
+        endTextEditing(commit: true)
         let frame = globalSelectionRect()
         guard let image = annotatedSelectionImage() ?? croppedSelectionImage() else {
             dismiss()
@@ -935,6 +1366,7 @@ final class ScreenshotOverlay {
     }
 
     private func saveToDesktop() {
+        endTextEditing(commit: true)
         guard phase == .toolbar, let cgImage = annotatedSelectionImage() ?? croppedSelectionImage() else { dismiss(); return }
         let image = SendableCGImage(cgImage: cgImage)
         let anchor = globalSelectionCenter()
@@ -1265,6 +1697,23 @@ private final class OverlayPanel: NSPanel {
     override var canBecomeKey: Bool { true }
 }
 
+/// 文本标注编辑框：完全不可见的多行 NSTextView（Enter 换行），只负责键盘/IME/撤销；Esc 丢弃。
+/// 不可见所以不参与命中测试——命中区域（宽 240pt、高一行）会吞掉画布点击，让
+/// 「点空白完成」失效且隐形光标乱跳；键盘事件只依赖 first responder，不受 hitTest 影响
+private final class TextEditorView: NSTextView {
+    var onCancel: (() -> Void)?
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func keyDown(with event: NSEvent) {
+        if event.keyCode == 53 {  // kVK_Escape
+            onCancel?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+}
+
 /// 标注渲染：视图实时预览与复制/保存的烘焙共用同一实现（全走 CGContext，
 /// 两处上下文同源）。坐标系为遮罩视图局部坐标（左下原点）。仅 MainActor 调用
 @MainActor
@@ -1305,6 +1754,24 @@ private func renderAnnotation(_ annotation: Annotation, in ctx: CGContext,
         ctx.interpolationQuality = .none
         ctx.draw(pixelated, in: NSRect(origin: .zero, size: viewBounds))
         ctx.restoreGState()
+    case .text:
+        // TextKit 在左上原点、y 向下的局部坐标中绘制。显式绑定目标 CGContext，
+        // 让画布预览与复制/保存的离屏位图使用同一个绘制入口。
+        let layout = ScreenshotOverlay.makeOwningLayout(text: annotation.text,
+                                                        colorIndex: annotation.colorIndex,
+                                                        fontSize: annotation.fontSize, width: annotation.textWidth)
+        ctx.saveGState()
+        ctx.translateBy(x: annotation.point.x, y: annotation.point.y)
+        ctx.scaleBy(x: 1, y: -1)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: true)
+        // NSLayoutManager 不强持有 storage，优化构建也必须保活到绘制结束。
+        withExtendedLifetime(layout.storage) {
+            layout.layoutManager.drawGlyphs(
+                forGlyphRange: NSRange(location: 0, length: layout.layoutManager.numberOfGlyphs), at: .zero)
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        ctx.restoreGState()
     }
 }
 
@@ -1321,12 +1788,14 @@ private final class OverlayContentView: NSView {
     private var pixelRectProvider: ((NSRect) -> CGRect?)?
     /// 标注渲染状态（committed + 绘制中 + 马赛克帧 + 颜色），无标注时返回 nil 跳过绘制
     private var annotationStateProvider: (() -> AnnotationRenderState?)?
-    private var onMouseDown: ((NSPoint) -> Void)?
+    private var onMouseDown: ((NSPoint, Int) -> Void)?
     private var onMouseDragged: ((NSPoint) -> Void)?
     private var onMouseUp: ((NSPoint) -> Void)?
     private var onMouseMoved: ((NSPoint) -> Void)?
     private var onRightClick: (() -> Void)?
     private var colorBadgeProvider: (() -> ColorBadge?)?
+    /// 文本编辑中的画布覆盖物（光标 + 虚线框），nil = 未在编辑
+    private var textEditingProvider: (() -> (caret: NSRect, caretColor: NSColor, draftBorder: NSRect)?)?
     /// 工具栏期（无激活工具）才画 8 个调整手柄
     private var selectionHandlesProvider: (() -> Bool)?
     private var cursorProvider: (() -> NSCursor)?
@@ -1336,12 +1805,13 @@ private final class OverlayContentView: NSView {
                    selectionProvider: @escaping () -> NSRect,
                    pixelRectProvider: @escaping (NSRect) -> CGRect?,
                    annotationState: @escaping () -> AnnotationRenderState?,
-                   onMouseDown: @escaping (NSPoint) -> Void,
+                   onMouseDown: @escaping (NSPoint, Int) -> Void,
                    onMouseDragged: @escaping (NSPoint) -> Void,
                    onMouseUp: @escaping (NSPoint) -> Void,
                    onMouseMoved: @escaping (NSPoint) -> Void,
                    onRightClick: @escaping () -> Void,
                    colorBadge: @escaping () -> ColorBadge?,
+                   textEditing: @escaping () -> (caret: NSRect, caretColor: NSColor, draftBorder: NSRect)?,
                    selectionHandles: @escaping () -> Bool,
                    cursor: @escaping () -> NSCursor) {
         self.snapshotImage = snapshotImage
@@ -1356,6 +1826,7 @@ private final class OverlayContentView: NSView {
         self.onMouseMoved = onMouseMoved
         self.onRightClick = onRightClick
         self.colorBadgeProvider = colorBadge
+        self.textEditingProvider = textEditing
         self.selectionHandlesProvider = selectionHandles
         self.cursorProvider = cursor
     }
@@ -1403,6 +1874,18 @@ private final class OverlayContentView: NSView {
                 renderAnnotation(d, in: ctx, pixelated: state.pixelated,
                                  viewBounds: bounds.size, palette: state.palette)
             }
+            ctx.restoreGState()
+        }
+        // ③⅔ 文本编辑中：光标与虚线编辑框（草稿文字已并入标注渲染）
+        if let editing = textEditingProvider?() {
+            ctx.saveGState()
+            ctx.clip(to: sel)
+            ctx.setFillColor(editing.caretColor.cgColor)
+            ctx.fill(editing.caret)
+            ctx.setStrokeColor(NSColor.separatorColor.cgColor)
+            ctx.setLineDash(phase: 0, lengths: [3, 3])
+            ctx.setLineWidth(1)
+            ctx.stroke(editing.draftBorder)
             ctx.restoreGState()
         }
         // ④ 选区边框：主题蓝 1.5pt + 外圈暗描边
@@ -1543,7 +2026,7 @@ private final class OverlayContentView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         currentCursor.set()
-        onMouseDown?(convert(event.locationInWindow, from: nil))
+        onMouseDown?(convert(event.locationInWindow, from: nil), event.clickCount)
     }
 
     override func mouseDragged(with event: NSEvent) {
@@ -1601,6 +2084,21 @@ private final class OverlayContentView: NSView {
 
 // MARK: - 选区工具栏
 
+/// 图标按钮悬停淡底：纯视觉反馈，不改布局尺寸
+private struct HoverHighlight: ViewModifier {
+    @State private var hovering = false
+    func body(content: Content) -> some View {
+        content
+            .background {
+                if hovering {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.primary.opacity(0.1))
+                }
+            }
+            .onHover { hovering = $0 }
+    }
+}
+
 /// 工具栏按钮态。@Observable 原地更新（无闪烁、无 fittingSize 重测竞态）；
 /// overlay 自身字段仍是唯一事实源，model 只是视图投影
 @MainActor
@@ -1608,7 +2106,8 @@ private final class OverlayContentView: NSView {
 private final class ToolbarModel {
     var activeTool: AnnotationTool?
     var canUndo = false
-    var colorIndex = 0
+    var colorIndex = ScreenshotOverlay.defaultAnnotationColorIndex
+    var fontSize = ScreenshotOverlay.defaultTextFontSize
 }
 
 private struct ToolbarView: View {
@@ -1617,32 +2116,41 @@ private struct ToolbarView: View {
     let onCopy: () -> Void
     let onSave: () -> Void
     let onPin: () -> Void
+    let onCancel: () -> Void
     let onToggleTool: (AnnotationTool) -> Void
     let onUndo: () -> Void
     let onSetColor: (Int) -> Void
+    let onSetFontSize: (CGFloat) -> Void
 
-    /// 笔迹类工具激活时展开色板（马赛克无颜色概念）
+    /// 笔迹类工具激活时展开色板（马赛克无颜色概念；文本用当前色着色）
     private var showsColorSwatches: Bool {
-        model.activeTool == .pen || model.activeTool == .rect
+        model.activeTool == .pen || model.activeTool == .rect || model.activeTool == .text
     }
 
     var body: some View {
         HStack(spacing: 2) {
-            toolButton("画笔", systemImage: "pencil.tip", tool: .pen)
-            toolButton("矩形", systemImage: "rectangle", tool: .rect)
-            toolButton("马赛克", systemImage: "square.grid.3x3", tool: .mosaic)
+            toolButton("画笔", "pencil.tip", .pen)
+            toolButton("矩形", "rectangle", .rect)
+            toolButton("马赛克", "square.grid.3x3", .mosaic)
+            toolButton("文本", "character.textbox", .text, character: "T")
             if showsColorSwatches {
                 Divider().frame(height: 16)
                 ForEach(ScreenshotOverlay.annotationPalette.indices, id: \.self) { index in
                     swatch(index: index)
                 }
             }
+            if model.activeTool == .text {
+                Divider().frame(height: 16)
+                ForEach(ScreenshotOverlay.textFontSizes, id: \.self) { size in
+                    fontSizeButton(size)
+                }
+            }
             Button(action: onUndo) {
                 Image(systemName: "arrow.uturn.backward")
                     .font(.system(size: 12, weight: .medium))
                     .foregroundStyle(model.canUndo ? .primary : .tertiary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 5)
+                    .frame(width: 26, height: 26)
+                    .modifier(HoverHighlight())
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
@@ -1650,12 +2158,13 @@ private struct ToolbarView: View {
             .help("撤销标注（⌘Z）")
             .accessibilityLabel("撤销标注")
             Divider().frame(height: 16)
+            button("关闭", systemImage: "xmark", action: onCancel, help: "关闭（Esc）")
             button("文字识别", systemImage: "text.viewfinder", action: onOCR)
-            button("复制", systemImage: "doc.on.doc", action: onCopy)
-            button("保存", systemImage: "square.and.arrow.down", action: onSave,
-                   help: "保存到桌面（按住 ⌥ 点击可选择位置）")
-            button("钉图", systemImage: "pin", action: onPin,
+            button("钉住", systemImage: "pin", action: onPin,
                    help: "将截图钉在屏幕上，可拖动或缩放")
+            button("保存", systemImage: "arrow.down.doc", action: onSave,
+                   help: "保存到桌面（按住 ⌥ 点击可选择位置）")
+            button("复制", systemImage: "doc.on.doc", action: onCopy)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 6)
@@ -1670,19 +2179,27 @@ private struct ToolbarView: View {
         )
     }
 
+    private func toolButton(_ title: String, _ systemImage: String, _ tool: AnnotationTool, character: String? = nil) -> some View {
+        ToolIconButton(title: title, systemImage: systemImage, character: character, active: model.activeTool == tool) {
+            onToggleTool(tool)
+        }
+    }
+
+    /// 动作按钮：纯图标（文字只在 help 与辅助功能里），悬停为 26×26 圆角正方形
     private func button(_ title: String, systemImage: String, action: @escaping () -> Void, help: String? = nil) -> some View {
         Button(action: action) {
-            Label(title, systemImage: systemImage)
+            Image(systemName: systemImage)
                 .font(.system(size: 12, weight: .medium))
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
+                .frame(width: 26, height: 26)
+                .modifier(HoverHighlight())
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .help(help ?? title)
+        .accessibilityLabel(title)
     }
 
-    /// 色板圆点：选中态白圈 + 深色外圈双环，压暗底和亮底都可见
+    /// 色板圆点：选中态放大 + 白圈/深圈双环描边，压暗底和亮底都可见
     private func swatch(index: Int) -> some View {
         let color = ScreenshotOverlay.annotationPalette[index]
         let selected = model.colorIndex == index
@@ -1691,7 +2208,7 @@ private struct ToolbarView: View {
         } label: {
             Circle()
                 .fill(Color(nsColor: color))
-                .frame(width: 12, height: 12)
+                .frame(width: selected ? 16 : 12, height: selected ? 16 : 12)
                 .overlay {
                     if selected {
                         Circle().strokeBorder(Color.white, lineWidth: 1.5)
@@ -1707,28 +2224,268 @@ private struct ToolbarView: View {
         .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
-    /// 标注工具按钮：图标态，激活时 accent 圆角底 + 白图标
-    private func toolButton(_ title: String, systemImage: String, tool: AnnotationTool) -> some View {
-        let active = model.activeTool == tool
+    /// 字号档位按钮：选中态 accent 底 + 白字，与工具按钮同语言
+    private func fontSizeButton(_ size: CGFloat) -> some View {
+        let selected = model.fontSize == size
         return Button {
-            onToggleTool(tool)
+            onSetFontSize(size)
         } label: {
-            Image(systemName: systemImage)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(active ? Color.white : Color.primary)
-                .padding(.horizontal, 7)
-                .padding(.vertical, 5)
+            Text("\(Int(size))")
+                .font(.system(size: 11, weight: selected ? .semibold : .regular))
+                .foregroundStyle(selected ? Color.white : Color.primary)
+                .frame(width: 26, height: 26)
                 .background {
-                    if active {
+                    if selected {
                         RoundedRectangle(cornerRadius: 6, style: .continuous)
                             .fill(Color.accentColor)
                     }
                 }
+                .modifier(HoverHighlight())
                 .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .help(title)
-        .accessibilityLabel(title)
-        .accessibilityAddTraits(active ? .isSelected : [])
+        .help("字号 \(Int(size))")
+        .accessibilityLabel("字号 \(Int(size))")
+        .accessibilityAddTraits(selected ? .isSelected : [])
+    }
+
+    /// 标注工具按钮：图标态，激活时 accent 圆角底 + 白图标，悬停淡底。
+    /// character 非 nil 时以该字符替代 SF Symbol（文本工具用 T 字，与主流截图工具一致）
+    private struct ToolIconButton: View {
+        let title: String
+        let systemImage: String
+        var character: String? = nil
+        let active: Bool
+        let action: () -> Void
+        @State private var hovering = false
+        var body: some View {
+            Button(action: action) {
+                Group {
+                    if let character {
+                        Text(character)
+                            .font(.system(size: 15, weight: .medium))
+                    } else {
+                        Image(systemName: systemImage)
+                            .font(.system(size: 12, weight: .medium))
+                    }
+                }
+                .foregroundStyle(active ? Color.white : Color.primary)
+                .frame(width: 26, height: 26)
+                .background {
+                    if active {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.accentColor)
+                    } else if hovering {
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(Color.primary.opacity(0.1))
+                    }
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .help(title)
+            .accessibilityLabel(title)
+            .accessibilityAddTraits(active ? .isSelected : [])
+            .onHover { hovering = $0 }
+        }
+    }
+}
+
+// MARK: - 文本标注渲染自测（SOUNDIN_TEXT_SELFTEST=1 随启动执行一次）
+// 背景：drawGlyphs 在裸 CGContext（烘焙路径）实测静默不画且破坏上下文状态；
+// 编辑期画布路径是否正常需真实证据。此钩子用合成冻结帧驱动完整流程，每步同时抓
+// CGWindowListCreateImage（窗口真实合成帧 ≈ 用户所见）与 cacheDisplay（视图重渲染）。
+extension ScreenshotOverlay {
+    func runTextSelfTest() {
+        let dir = URL(fileURLWithPath: "/tmp/soundin-selftest")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+
+        // ── 字形诊断：验证"应用进程内 makeTextLayout 零字形"假设，并逐个试绕法
+        do {
+            let text = "你好abc"
+            let attrs = Self.textAttributes(colorIndex: 0, fontSize: 18)
+            let storage = NSTextStorage(string: text, attributes: attrs)
+            let lm = NSLayoutManager()
+            storage.addLayoutManager(lm)
+            let tc = NSTextContainer(size: NSSize(width: Self.textMaxWidth, height: CGFloat.greatestFiniteMagnitude))
+            tc.lineFragmentPadding = 0
+            lm.addTextContainer(tc)
+            lm.ensureLayout(for: tc)
+            let used = lm.usedRect(for: tc)
+            HotkeyFileLog.shared.log("diag1: glyphs=\(lm.numberOfGlyphs) used=\(used.width)x\(used.height) utf16=\((text as NSString).length)")
+            let layout1 = Self.makeOwningLayout(text: text, colorIndex: 0, fontSize: 18)
+            HotkeyFileLog.shared.log("diag2 makeOwningLayout: glyphs=\(layout1.layoutManager.numberOfGlyphs) blockSize=\(layout1.blockSize)")
+
+            // 绕法 B：glyphRange(forCharacterRange:) 显式字形范围
+            let storage3 = NSTextStorage(string: text, attributes: attrs)
+            let lm3 = NSLayoutManager()
+            storage3.addLayoutManager(lm3)
+            let tc3 = NSTextContainer(size: NSSize(width: Self.textMaxWidth, height: CGFloat.greatestFiniteMagnitude))
+            tc3.lineFragmentPadding = 0
+            lm3.addTextContainer(tc3)
+            let charRange = NSRange(location: 0, length: (text as NSString).length)
+            let glyphRange = lm3.glyphRange(forCharacterRange: charRange, actualCharacterRange: nil)
+            HotkeyFileLog.shared.log("diag3 glyphRange: glyphs=\(glyphRange.length) numberOfGlyphs=\(lm3.numberOfGlyphs)")
+
+            // 各管线把文字画进裸位图数暗像素（systemRed vs black、glyphRange 显式 vs numberOfGlyphs）
+            func pixelCount(lm: NSLayoutManager, range: NSRange, red: Bool, label: String) {
+                let W = 300, H = 100
+                guard let ctx = CGContext(data: nil, width: W, height: H, bitsPerComponent: 8, bytesPerRow: 0,
+                                          space: CGColorSpaceCreateDeviceRGB(),
+                                          bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue),
+                      let data = ctx.data else { return }
+                ctx.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+                ctx.fill(CGRect(x: 0, y: 0, width: W, height: H))
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = NSGraphicsContext(cgContext: ctx, flipped: false)
+                lm.drawGlyphs(forGlyphRange: range, at: NSPoint(x: 20, y: 30))
+                NSGraphicsContext.restoreGraphicsState()
+                let bytes = data.bindMemory(to: UInt8.self, capacity: W * H * 4)
+                var dark = 0
+                for i in stride(from: 0, to: W * H * 4, by: 8) {
+                    if Int(bytes[i]) < 160 && Int(bytes[i+1]) < 160 && Int(bytes[i+2]) < 160 { dark += 1 }
+                }
+                HotkeyFileLog.shared.log("diag5 \(label): darkPx=\(dark)")
+            }
+            // diag1 的管线（可能零字形）
+            pixelCount(lm: lm, range: NSRange(location: 0, length: lm.numberOfGlyphs), red: false, label: "diag1管线+numberOfGlyphs范围")
+            // lm3（glyphRange 生成）
+            pixelCount(lm: lm3, range: NSRange(location: 0, length: lm3.numberOfGlyphs), red: false, label: "lm3+glyphs范围")
+            // 黑色对照
+            let storageB = NSTextStorage(string: "hello", attributes: [.font: NSFont.systemFont(ofSize: 18), .foregroundColor: NSColor.black])
+            let lmB = NSLayoutManager()
+            storageB.addLayoutManager(lmB)
+            let tcB = NSTextContainer(size: NSSize(width: 236, height: CGFloat.greatestFiniteMagnitude))
+            tcB.lineFragmentPadding = 0
+            lmB.addTextContainer(tcB)
+            lmB.ensureLayout(for: tcB)
+            HotkeyFileLog.shared.log("diag6 black管线: glyphs=\(lmB.numberOfGlyphs)")
+            pixelCount(lm: lmB, range: NSRange(location: 0, length: lmB.numberOfGlyphs), red: false, label: "black管线")
+        }
+
+        // 合成冻结帧：浅灰底 + 顶部色带（scale 1 → pixelScale = 1）
+        guard let screen = NSScreen.main,
+              let ctx = CGContext(
+                data: nil, width: Int(screen.frame.width), height: Int(screen.frame.height),
+                bitsPerComponent: 8, bytesPerRow: 0,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue
+              ),
+              let synthetic = ctx.makeImage() else {
+            HotkeyFileLog.shared.log("selftest: synthetic frame failed")
+            exit(1)
+        }
+        ctx.setFillColor(CGColor(red: 0.92, green: 0.92, blue: 0.92, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: 0, width: synthetic.width, height: synthetic.height))
+        ctx.setFillColor(CGColor(red: 0.3, green: 0.6, blue: 0.9, alpha: 1))
+        ctx.fill(CGRect(x: 0, y: synthetic.height - 60, width: synthetic.width, height: 60))
+        guard let synthetic = ctx.makeImage() else { exit(1) }
+
+        targetScreen = screen
+        presentOverlay(image: synthetic)
+        selectionRect = NSRect(x: 150, y: 200, width: 500, height: 400)
+        enterToolbarPhase()
+        toggleTool(.text)
+        stepCapture("01-toolbar", dir: dir)
+
+        let click = NSPoint(x: 400, y: 420)
+        beginTextEditing(anchor: click, initialText: "", fontSize: 18, colorIndex: 0, editingIndex: nil)
+        HotkeyFileLog.shared.log("selftest: click=(400,420) anchor=(\(textAnchor.x),\(textAnchor.y))")
+        stepCapture("02-caret-empty", dir: dir)
+
+        textEditor?.insertText("你好abc")
+        HotkeyFileLog.shared.log("selftest: draft anchor=(\(textAnchor.x),\(textAnchor.y)) caret=\(String(describing: lastCaretRect)) draftBounds=\(String(describing: textDraft.map { annotationBounds($0) }))")
+        stepCapture("03-draft", dir: dir)
+
+        endTextEditing(commit: true)
+        stepCapture("04-committed", dir: dir)
+
+        if let baked = annotatedSelectionImage(), let rep = NSBitmapImageRep(cgImage: baked).representation(using: .png, properties: [:]) {
+            try? rep.write(to: dir.appendingPathComponent("05-baked.png"))
+        }
+
+        // 窄选区：点击右缘 (260,260)，锚点应留在点击处（宽度 0 夹取语义）
+        selectionRect = NSRect(x: 150, y: 200, width: 150, height: 120)
+        beginTextEditing(anchor: NSPoint(x: 260, y: 260), initialText: "", fontSize: 18, colorIndex: 0, editingIndex: nil)
+        textEditor?.insertText("窄区文字")
+        HotkeyFileLog.shared.log("selftest narrow: click=(260,260) anchor=(\(textAnchor.x),\(textAnchor.y))")
+        stepCapture("06-narrow-draft", dir: dir)
+        endTextEditing(commit: true)
+        stepCapture("07-narrow-committed", dir: dir)
+
+        // 交互回归：同一次点击提交并新建/拖动，松手应用最后位移，双击重编辑可取消。
+        annotations.removeAll()
+        selectionRect = NSRect(x: 150, y: 200, width: 500, height: 400)
+        let first = NSPoint(x: 230, y: 480)
+        let second = NSPoint(x: 440, y: 340)
+        for size in Self.textFontSizes {
+            beginTextEditing(anchor: first, initialText: "", fontSize: size, colorIndex: 0, editingIndex: nil)
+            precondition(abs((lastCaretRect?.midY ?? .infinity) - first.y) < 0.01)
+            let emptyOverlay = currentTextEditingOverlay()!
+            precondition(emptyOverlay.draftBorder.contains(emptyOverlay.caret.insetBy(dx: -1, dy: -1)))
+            textEditor?.insertText("中文abc")
+            precondition(abs((lastCaretRect?.midY ?? .infinity) - first.y) <= 1.5)
+            textEditor?.insertText("\n")
+            let newlineOverlay = currentTextEditingOverlay()!
+            precondition(newlineOverlay.draftBorder.contains(newlineOverlay.caret.insetBy(dx: -1, dy: -1)))
+            endTextEditing(commit: false)
+        }
+        annotationFontSize = Self.defaultTextFontSize
+        handleMouseDown(first, clickCount: 1)
+        precondition(abs((lastCaretRect?.midY ?? .infinity) - first.y) < 0.01)
+        textEditor?.insertText("第一段中文\nSecond line")
+        let firstAnchor = textAnchor
+        precondition(textDraft?.text.isEmpty == false)
+        precondition((lastCaretRect?.minX ?? .infinity) < first.x + Self.textMaxWidth)
+        handleMouseDown(second, clickCount: 1)
+        precondition(annotations.count == 1 && textEditor != nil)
+        textEditor?.insertText("第二段文字")
+        let secondAnchor = textAnchor
+        let hit = NSPoint(x: firstAnchor.x + 12, y: firstAnchor.y - 12)
+        handleMouseDown(hit, clickCount: 1)
+        precondition(annotations.count == 2 && textDrag?.index == 0)
+        handleMouseDragged(NSPoint(x: hit.x + 30, y: hit.y - 20))
+        handleMouseUp(NSPoint(x: hit.x + 55, y: hit.y - 35))
+        precondition(annotations[0].point == NSPoint(x: firstAnchor.x + 55, y: firstAnchor.y - 35))
+        precondition(annotations[1].point == secondAnchor && textDrag == nil)
+        let moved = annotations[0].point
+        handleMouseDown(NSPoint(x: moved.x + 12, y: moved.y - 12), clickCount: 2)
+        precondition(editingTextIndex == 0 && textEditor?.string == annotations[0].text)
+        precondition(textAnchor == moved)
+        endTextEditing(commit: false)
+        precondition(annotations.count == 2 && annotations[0].point == moved)
+        stepCapture("08-interaction-regression", dir: dir)
+        if let image = annotatedSelectionImage() {
+            writePNG(NSBitmapImageRep(cgImage: image), "09-interaction-baked", dir: dir)
+        }
+        try? "PASS: caret centered on click at all font sizes, no re-edit drift, consecutive text creation, multiline caret, commit-and-drag, final mouse-up position, independent texts, re-edit cancellation\n"
+            .write(to: dir.appendingPathComponent("interaction-result.txt"), atomically: true, encoding: .utf8)
+
+        dismiss()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(0) }
+    }
+
+    private func stepCapture(_ name: String, dir: URL) {
+        guard let panel = overlayPanel, let view = overlayView else { return }
+        view.needsDisplay = true
+        view.displayIfNeeded()
+        RunLoop.current.run(until: Date().addingTimeInterval(0.15))
+        // ① 窗口真实合成帧（≈用户所见）：CGWindowListCreateImage 在新 SDK 已移除，走 screencapture CLI
+        let windowShot = dir.appendingPathComponent("\(name)-window.png")
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        proc.arguments = ["-x", "-o", "-l\(panel.windowNumber)", windowShot.path]
+        try? proc.run()
+        proc.waitUntilExit()
+        // ② 视图重渲染帧（绕过窗口合成，直接走 draw() → 位图）
+        if let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+            view.cacheDisplay(in: view.bounds, to: rep)
+            writePNG(rep, "\(name)-redraw", dir: dir)
+        }
+    }
+
+    private func writePNG(_ rep: NSBitmapImageRep, _ name: String, dir: URL) {
+        guard let png = rep.representation(using: .png, properties: [:]) else { return }
+        try? png.write(to: dir.appendingPathComponent("\(name).png"))
     }
 }

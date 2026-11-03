@@ -393,7 +393,7 @@ private struct ScreenshotOCRPanelView: View {
         let canCopy: Bool
         if case .result = mode { canCopy = true } else { canCopy = false }
         return ResultPanelHeader(title: title, systemImage: "text.viewfinder",
-                                 onCopy: canCopy ? onCopy : nil, onClose: onClose)
+                                 onCopy: canCopy ? onCopy : nil, showsCopyText: false, onClose: onClose)
     }
 
     @ViewBuilder
