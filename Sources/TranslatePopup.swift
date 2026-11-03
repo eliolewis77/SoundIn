@@ -358,7 +358,7 @@ private struct TranslatePopupView: View {
             header
             if !model.original.isEmpty {
                 Text(model.original)
-                    .font(.footnote)
+                    .font(.callout)
                     .foregroundStyle(.secondary)
                     .lineLimit(3)
             }
@@ -433,5 +433,32 @@ private struct PopupLoadingDots: View {
                 }
             }
         }
+    }
+}
+
+// MARK: - 弹窗自测（SOUNDIN_POPUP_SELFTEST=1 随启动执行一次）
+// 模式同 ScreenshotOverlay.runTextSelfTest：真实 NSPanel 渲染，screencapture -l 抓
+// 窗口合成帧（≈用户所见）写 /tmp/soundin-selftest/，供字号/布局迭代进程内核对。
+extension TranslatePopup {
+    func runPopupSelfTest() {
+        let dir = URL(fileURLWithPath: "/tmp/soundin-selftest")
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        show(original: "The quick brown fox jumps over the lazy dog while the sun sets behind the hills.", anchor: nil)
+        capture("popup-loading", dir: dir)
+        showResult("趁着太阳落到山后，敏捷的棕色狐狸跳过了懒惰的狗。")
+        capture("popup-result", dir: dir)
+        hideImmediately()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { exit(0) }
+    }
+
+    private func capture(_ name: String, dir: URL) {
+        guard let panel else { return }
+        // 等淡入动画（0.18s）与 fittingSize 校准落定，再抓窗口真实合成帧
+        RunLoop.current.run(until: Date().addingTimeInterval(0.5))
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
+        proc.arguments = ["-x", "-o", "-l\(panel.windowNumber)", dir.appendingPathComponent("\(name).png").path]
+        try? proc.run()
+        proc.waitUntilExit()
     }
 }

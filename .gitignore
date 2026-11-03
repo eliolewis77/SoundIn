@@ -26,3 +26,4 @@ TODOS.md
 .secrets/
 sparkle_private_key
 .swiftpm
+dev.script.md
