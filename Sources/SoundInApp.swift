@@ -53,21 +53,36 @@ private struct SettingsWindowTag: NSViewRepresentable {
 private struct HoverableButtonStyle: ButtonStyle {
     /// 前景与 hover 底色的基调；危险操作（删除/清空）传 .red
     var tint: Color = .primary
+    /// true = 素态无底色（悬停才浮现淡底）；false = 常驻淡底 + 悬停加深
+    var flat = false
     @State private var isHovered = false
     @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
+        let base = configuration.label
             .foregroundStyle(
                 isEnabled ? (configuration.isPressed ? tint.opacity(0.55) : tint) : Color.secondary
             )
-            .padding(.horizontal, 9)
-            .padding(.vertical, 4)
-            .background(
-                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                    .fill(isHovered && isEnabled ? tint.opacity(0.12) : tint.opacity(0.05))
-            )
-            .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
+        return Group {
+            if flat {
+                // 图标按钮：固定正方形命中区/悬停底——SF Symbol 宽高不一，跟随内容必然出扁矩形
+                base
+                    .frame(width: 28, height: 28)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(isHovered && isEnabled ? tint.opacity(0.12) : Color.clear)
+                    )
+            } else {
+                base
+                    .padding(.horizontal, 9)
+                    .padding(.vertical, 4)
+                    .background(
+                        RoundedRectangle(cornerRadius: 6, style: .continuous)
+                            .fill(isHovered && isEnabled ? tint.opacity(0.12) : tint.opacity(0.05))
+                    )
+            }
+        }
+        .contentShape(RoundedRectangle(cornerRadius: 6, style: .continuous))
             .onHover { hovering in
                 isHovered = hovering
                 if hovering {
@@ -262,11 +277,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // 把识别/润色各自选中的 API 配置档回写进 SpeechManager（升级迁移后保证活动值一致）
         APIProfileStore.shared.applyActive(to: SpeechManager.shared)
         HotkeyInputManager.shared.start()
+        // 输入采集：用户在设置页开启过才随启动恢复（privacy-first，默认关闭）
+        if TypingCollector.shared.enabled {
+            TypingCollector.shared.start()
+        }
         // 自动更新：延迟几秒静默检查，失败不打扰用户；UI 测试实例跳过
         // （Sparkle 在裸 SPM 二进制下 startUpdater 会弹模态错误框卡死主队列，
         // SOUNDIN_UI_TEST 环境变量是合成帧 UI 验证的约定入口）
         if ProcessInfo.processInfo.environment["SOUNDIN_UI_TEST"] == nil {
             AppUpdater.shared.scheduleStartupCheck()
+        }
+        // 文本标注渲染自测：合成冻结帧驱动完整编辑流程，把真实窗口合成帧写 /tmp/soundin-selftest/
+        if ProcessInfo.processInfo.environment["SOUNDIN_TEXT_SELFTEST"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                ScreenshotOverlay.shared.runTextSelfTest()
+            }
+        }
+        // 翻译弹窗自测：加载态 + 结果态各抓一张窗口合成帧写同一目录
+        if ProcessInfo.processInfo.environment["SOUNDIN_POPUP_SELFTEST"] == "1" {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.8) {
+                TranslatePopup.shared.runPopupSelfTest()
+            }
         }
         HotkeyInputManager.shared.onStateChange = { newPhase in
             Task { @MainActor in
@@ -282,7 +313,7 @@ private struct SettingsView: View {
     @Environment(\.colorScheme) private var colorScheme
 
     enum Page: String, CaseIterable, Identifiable {
-        case general, hotkeys, engine, polish, translate, stats, history, about
+        case general, hotkeys, engine, polish, translate, stats, history, collection, about
 
         var id: String { rawValue }
 
@@ -295,6 +326,7 @@ private struct SettingsView: View {
             case .translate: "翻译"
             case .stats: "统计"
             case .history: "历史记录"
+            case .collection: "输入采集"
             case .about: "关于"
             }
         }
@@ -308,6 +340,7 @@ private struct SettingsView: View {
             case .translate: "character.book.closed"
             case .stats: "chart.bar.fill"
             case .history: "clock.arrow.circlepath"
+            case .collection: "pencil.and.list.clipboard"
             case .about: "info.circle"
             }
         }
@@ -322,6 +355,8 @@ private struct SettingsView: View {
     @ObservedObject var translationHistory = TranslationHistory.shared
     @ObservedObject var profileStore = APIProfileStore.shared
     @ObservedObject var stats = DictationStats.shared
+    @ObservedObject var collector = TypingCollector.shared
+    @ObservedObject var collectionStore = TypingCollectionStore.shared
     @State private var selectedPage: Page = .general
     @State private var isAddingProfile = false
     @State private var newProfileName = ""
@@ -351,6 +386,13 @@ private struct SettingsView: View {
     @State private var isTestingTranslateConnection = false
     @State private var isConfirmingClearHistory = false
     @State private var isConfirmingClearTranslationHistory = false
+    @State private var isConfirmingClearCollection = false
+    /// 采集保留天数（0 = 永久），与 TypingCollectionStore.retentionDays 同读一个 UserDefaults 键
+    @AppStorage("typingCollection.retentionDays") private var collectionRetentionDays = 0
+    /// 采集列表勾选管理：顶部全选 + 单条勾选，导出/删除作用于勾选集
+    @State private var selectedEntryIDs: Set<UUID> = []
+    @State private var isConfirmingDeleteSelected = false
+    @State private var isConfirmingClearAllCollection = false
     @State private var sidebarVisible = true
     // 权限状态的刷新计数：TCC 授权变化系统不会推送通知，授权 API 也不是可观察状态，
     // 只能靠重查。两个触发源见权限区块上的 onReceive：应用回到前台 + 可见期间轻量轮询。
@@ -361,6 +403,25 @@ private struct SettingsView: View {
     @State private var translateKey: UInt16 = HotkeyInputManager.shared.translateKey
     @State private var translateTapCount: Int = HotkeyInputManager.shared.translateTapCount
     @State private var translateInterval: Double = HotkeyInputManager.shared.translateInterval
+
+    /// 侧边栏行项：Label + hover 底色。抽成独立函数——原来内联在 ForEach 闭包里，
+    /// 页面枚举扩容后整个复合表达式超出类型检查器的求解预算（Label 处超时）。
+    private func sidebarRow(for page: Page) -> some View {
+        let isHoverCandidate = hoveredPage == page && selectedPage != page
+        let background = RoundedRectangle(cornerRadius: 5, style: .continuous)
+            .fill(isHoverCandidate ? Color.primary.opacity(0.08) : Color.clear)
+            // 左右留边对齐系统选中框宽度（选中框不是贯穿整行的）
+            .padding(.horizontal, 10)
+        return Label {
+            Text(page.title)
+        } icon: {
+            Image(systemName: page.icon)
+        }
+        .onHover { hovering in
+            hoveredPage = hovering ? page : (hoveredPage == page ? nil : hoveredPage)
+        }
+        .listRowBackground(background)
+    }
 
     /// 侧边栏自定义底色：比系统默认侧边栏材质浅一档，跟随深浅色模式
     private static let sidebarBackground = Color(nsColor: NSColor(name: nil) { appearance in
@@ -375,16 +436,7 @@ private struct SettingsView: View {
             if sidebarVisible {
                 List(selection: $selectedPage) {
                     ForEach(Page.allCases) { page in
-                        Label(page.title, systemImage: page.icon)
-                            .tag(page)
-                            .onHover { hoveredPage = $0 ? page : (hoveredPage == page ? nil : hoveredPage) }
-                            .listRowBackground(
-                                RoundedRectangle(cornerRadius: 5, style: .continuous)
-                                    .fill(hoveredPage == page && selectedPage != page
-                                          ? Color.primary.opacity(0.08) : Color.clear)
-                                    // 左右留边对齐系统选中框宽度（选中框不是贯穿整行的）
-                                    .padding(.horizontal, 10)
-                            )
+                        sidebarRow(for: page).tag(page)
                     }
                 }
                 .listStyle(.sidebar)
@@ -402,6 +454,7 @@ private struct SettingsView: View {
                 case .translate: translatePage
                 case .stats: statsPage
                 case .history: historyPage
+                case .collection: collectionPage
                 case .about: aboutPage
                 }
             }
@@ -1411,6 +1464,254 @@ private struct SettingsView: View {
             }
         } header: {
             historyPickerHeader
+        }
+    }
+
+    // MARK: - 输入采集
+    @ViewBuilder
+    private var collectionPage: some View {
+        Section {
+            Toggle(isOn: Binding(
+                get: { collector.enabled },
+                set: { collector.setEnabled($0) }
+            )) {
+                HStack(spacing: 6) {
+                    Text("开启输入采集")
+                    // 状态并入开关行：AX 权限未授时不显示"正在记录"（下方引导行接管）
+                    if collector.enabled, AXIsProcessTrusted() {
+                        Label("正在记录", systemImage: "record.circle")
+                            .font(.footnote)
+                            .foregroundStyle(Color.green)
+                    }
+                }
+            }
+            if collector.enabled, !AXIsProcessTrusted() {
+                permissionRow(title: "辅助功能（输入采集依赖）", granted: false, undetermined: false,
+                              panel: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+            }
+            Picker("自动清理", selection: $collectionRetentionDays) {
+                Text("永久保留").tag(0)
+                Text("保留 7 天").tag(7)
+                Text("保留 30 天").tag(30)
+                Text("保留 90 天").tag(90)
+            }
+            .onChange(of: collectionRetentionDays) { _ in
+                TypingCollectionStore.shared.purgeExpired()
+            }
+        } header: {
+            Text("采集开关")
+        } footer: {
+            Text("记录你在各应用中键入的文本，用于导出高频语句供 AI 整理成英文。数据仅存本机（明文），默认永久保留，可设自动清理期限，也可在列表中勾选后批量导出/删除；密码等安全输入框与常见密码管理器不会记录。")
+                .font(.footnote)
+                .foregroundStyle(.secondary)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+
+        Group {
+            if collector.enabled {
+                collectionListSection
+            }
+        }
+        .confirmationDialog(
+            "删除已选中的 \(collectionStore.entries.filter { selectedEntryIDs.contains($0.id) }.count) 条采集记录？",
+            isPresented: $isConfirmingDeleteSelected,
+            titleVisibility: .visible
+        ) {
+            Button("删除", role: .destructive) {
+                collectionStore.delete(ids: selectedEntryIDs)
+                selectedEntryIDs = []
+            }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("操作不可撤销。")
+        }
+        .confirmationDialog(
+            "清空全部采集内容？",
+            isPresented: $isConfirmingClearAllCollection,
+            titleVisibility: .visible
+        ) {
+            Button("清空", role: .destructive) { collectionStore.clear() }
+            Button("取消", role: .cancel) {}
+        } message: {
+            Text("删除全部已采集的输入记录，操作不可撤销。")
+        }
+    }
+
+    // MARK: - 采集列表（勾选管理：顶部全选 + 单条勾选，批量导出/删除；底部导出全部/清空）
+
+    private struct CollectionDayGroup: Identifiable {
+        let label: String
+        let entries: [TypingCollectionStore.Entry]
+        var id: String { label }
+    }
+
+    /// 条目按天分组。entries 已按时间倒序（存储层保证），组序随首现顺序 = 最新在前
+    private func collectionDayGroups(from entries: [TypingCollectionStore.Entry]) -> [CollectionDayGroup] {
+        let cal = Calendar.current
+        let keyFormat = DateFormatter()
+        keyFormat.dateFormat = "yyyy-MM-dd"
+        let dayFormat = DateFormatter()
+        dayFormat.dateFormat = "M月d日"
+        let weekdays = ["周日", "周一", "周二", "周三", "周四", "周五", "周六"]
+        var order: [String] = []
+        var buckets: [String: [TypingCollectionStore.Entry]] = [:]
+        for entry in entries {
+            let key = keyFormat.string(from: entry.timestamp)
+            if buckets[key] == nil {
+                order.append(key)
+                buckets[key] = []
+            }
+            buckets[key]?.append(entry)
+        }
+        return order.compactMap { key in
+            guard let list = buckets[key], let day = keyFormat.date(from: key) else { return nil }
+            let weekday = weekdays[cal.component(.weekday, from: day) - 1]
+            return CollectionDayGroup(label: "\(dayFormat.string(from: day)) \(weekday)", entries: list)
+        }
+    }
+
+    private func selectionBinding(_ id: UUID) -> Binding<Bool> {
+        Binding(
+            get: { selectedEntryIDs.contains(id) },
+            set: {
+                if $0 { selectedEntryIDs.insert(id) } else { selectedEntryIDs.remove(id) }
+            }
+        )
+    }
+
+    @ViewBuilder
+    private var collectionListSection: some View {
+        let displayLimit = 500
+        let displayEntries = Array(collectionStore.entries.prefix(displayLimit))
+        let allIDs = Set(displayEntries.map(\.id))
+        let selectedEntries = displayEntries.filter { selectedEntryIDs.contains($0.id) }
+        if collectionStore.entries.isEmpty {
+            Section {
+                Text("暂无采集内容，在其他应用中打字后显示。")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            } header: {
+                Text("采集内容")
+            }
+        } else {
+            Section {
+                HStack(spacing: 10) {
+                    Toggle("全选", isOn: Binding(
+                        get: { !allIDs.isEmpty && allIDs.isSubset(of: selectedEntryIDs) },
+                        set: { on in
+                            if on { selectedEntryIDs.formUnion(allIDs) } else { selectedEntryIDs.subtract(allIDs) }
+                        }
+                    ))
+                    .toggleStyle(.checkbox)
+                    .font(.footnote)
+                    if !selectedEntries.isEmpty {
+                        Text("已选 \(selectedEntries.count) 条")
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    // 无勾选 = 作用于全部；有勾选 = 只作用于勾选集
+                    Button {
+                        exportCollection(
+                            selectedEntries.isEmpty ? nil : selectedEntries,
+                            fileNameSuffix: selectedEntries.isEmpty ? "" : "-已选\(selectedEntries.count)条"
+                        )
+                    } label: {
+                        Image(systemName: "square.and.arrow.down")
+                    }
+                    .buttonStyle(HoverableButtonStyle(flat: true))
+                    .help(selectedEntries.isEmpty ? "导出全部" : "导出勾选的 \(selectedEntries.count) 条记录")
+                    Button {
+                        if selectedEntries.isEmpty {
+                            isConfirmingClearAllCollection = true
+                        } else {
+                            isConfirmingDeleteSelected = true
+                        }
+                    } label: {
+                        Image(systemName: "trash")
+                    }
+                    .buttonStyle(HoverableButtonStyle(tint: .red, flat: true))
+                    .help(selectedEntries.isEmpty ? "清空全部采集记录" : "删除勾选的 \(selectedEntries.count) 条记录")
+                }
+                if collectionStore.entries.count > displayLimit {
+                    Text("仅显示最近 \(displayLimit) 条（勾选只作用于显示的条目），「导出全部」包含所有记录。")
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                }
+            } header: {
+                Text("采集内容")
+            }
+            ForEach(collectionDayGroups(from: displayEntries)) { group in
+                Section {
+                    HStack {
+                        Text(group.label)
+                            .font(.footnote)
+                            .foregroundStyle(.secondary)
+                        Text("\(group.entries.count) 条")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                        Spacer()
+                    }
+                    ForEach(group.entries) { entry in
+                        collectedEntryRow(entry)
+                    }
+                }
+            }
+        }
+    }
+
+    private func collectedEntryRow(_ entry: TypingCollectionStore.Entry) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Toggle("", isOn: selectionBinding(entry.id))
+                .labelsHidden()
+                .toggleStyle(.checkbox)
+            VStack(alignment: .leading, spacing: 3) {
+                Text(entry.text)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .textSelection(.enabled)
+                Text(entry.app)
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+            Spacer(minLength: 0)
+            VStack(alignment: .trailing, spacing: 4) {
+                Text(InputHistory.timeText(entry.timestamp))
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    Button("复制") { copyCollected(entry) }
+                        .font(.caption)
+                        .buttonStyle(.link)
+                    Button("删除") { collectionStore.delete(entry) }
+                        .font(.caption)
+                        .buttonStyle(.link)
+                }
+            }
+        }
+    }
+
+    private func copyCollected(_ entry: TypingCollectionStore.Entry) {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(entry.text, forType: .string)
+    }
+
+    /// 导出采集内容为 Markdown（去重聚合、按频次排序）：NSSavePanel 选位置，失败只记日志。
+    /// entries 为 nil 导出全部；传分组条目时用 fileNameSuffix 区分文件名（如"-11月2日 周日"）
+    private func exportCollection(_ entries: [TypingCollectionStore.Entry]? = nil, fileNameSuffix: String = "") {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.nameFieldStringValue = "SoundIn-输入采集\(fileNameSuffix).md"
+        panel.canCreateDirectories = true
+        panel.begin { response in
+            guard response == .OK, let url = panel.url else { return }
+            do {
+                let count = entries?.count ?? TypingCollectionStore.shared.entries.count
+                try TypingCollectionStore.shared.exportMarkdown(from: entries).write(to: url, atomically: true, encoding: .utf8)
+                HotkeyFileLog.shared.log("collector: exported \(count) entries")
+            } catch {
+                HotkeyFileLog.shared.log("collector: export failed — \(error.localizedDescription)")
+            }
         }
     }
 

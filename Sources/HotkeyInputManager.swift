@@ -638,7 +638,8 @@ final class HotkeyInputManager {
 
     /// 激活 Electron/Chromium 应用的无障碍树。两个属性都设是惯例写法：
     /// Chromium 响应 AXEnhancedUserInterface，Electron 响应 AXManualAccessibility。
-    nonisolated private static func activateElectronAccessibility(pid: pid_t) {
+    /// internal：输入采集（TypingCollector）复用同一激活路径。
+    nonisolated static func activateElectronAccessibility(pid: pid_t) {
         let appElement = AXUIElementCreateApplication(pid)
         AXUIElementSetAttributeValue(appElement, "AXManualAccessibility" as CFString, kCFBooleanTrue)
         AXUIElementSetAttributeValue(appElement, "AXEnhancedUserInterface" as CFString, kCFBooleanTrue)
@@ -690,21 +691,22 @@ final class HotkeyInputManager {
 
     /// 视为「输入框」的 AX 角色：命中则翻译结果写回光标处，
     /// 不命中但有选区时走弹窗模式（静态文本写回无处可去）。
-    private nonisolated static let editableAXRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
+    /// internal：输入采集（TypingCollector）共用同一份角色判定，避免两处漂移。
+    nonisolated static let editableAXRoles: Set<String> = ["AXTextField", "AXTextArea", "AXComboBox", "AXSearchField"]
 
     /// 整框翻译（无选区）的长度上限（字符）：焦点元素全文直接发往翻译 API 的边界。
     /// 超限基本都是终端缓冲 / 聊天记录这类大容器，不该整包上传——提示改走划词。
     private static let maxWholeFieldTranslateChars = 5000
 
     /// 读元素 AX 角色，读不到返回空串。
-    private nonisolated static func axRole(of element: AXUIElement) -> String {
+    nonisolated static func axRole(of element: AXUIElement) -> String {
         var roleRef: CFTypeRef?
         return AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleRef) == .success
             ? (roleRef as? String ?? "") : ""
     }
 
     /// 元素是否为可编辑输入角色。快照判定与整框翻译闸共用，避免两处判定漂移。
-    private nonisolated static func isEditableElement(_ element: AXUIElement) -> Bool {
+    nonisolated static func isEditableElement(_ element: AXUIElement) -> Bool {
         editableAXRoles.contains(axRole(of: element))
     }
 
