@@ -348,9 +348,26 @@ final class TypingCollector: ObservableObject {
     private var pollTimer: Timer?
     /// Electron 激活后异步重试订阅的防重入标记
     private var retryingFocus = false
+    /// 物理输入监听：AX 值变化分不清人敲的还是程序写进来的（agent 回复流式打进
+    /// 编辑器/集成终端、自动填充都没有伴随按键）。全局监听键盘/鼠标按下作时间戳，
+    /// 新增文本若不在最近物理输入的宽限窗口内即视为机器写入，拒收。
+    /// 全局监听只观察不吞事件（NSEvent 限制），与弹窗关闭监听同一套路。
+    private var physicalInputMonitor: Any?
+    private var lastPhysicalInputAt = Date.distantPast
+    /// 本应用自己的写回（语音转写 / 译文经 paste() 粘贴进输入框）：是程序写入但应采集
+    private var lastOwnWritebackAt = Date.distantPast
+    /// 机器写入抑制中的日志去重：只在进入/退出抑制时各记一条，流式写入不刷屏
+    private var suppressingMachineText = false
 
     private static let silenceFlushInterval: TimeInterval = 5
     private static let pollInterval: TimeInterval = 0.6
+    /// 物理按键/按下与随后 AX 值变化的允许间隔。实测人因延迟：打字 <50ms、
+    /// IME 候选上屏 ~100ms、终端回显（含 SSH）<500ms，0.8s 已留足余量。
+    /// 不能放宽：用户在别处打字会持续 re-arm 全局窗口，正在聚焦元素里流式写入的
+    /// agent 回复块距用户上一个按键通常 >0.8s，照此拒收（2026-11-04 实测 2s 会漏）
+    private static let physicalInputGrace: TimeInterval = 0.8
+    /// 自身写回豁免窗口：paste() 合成 ⌘V 后目标应用消费剪贴板最多等 1.5s，留 3s
+    private static let ownWritebackGrace: TimeInterval = 3
     private static let sentenceTerminators: Set<Character> = ["。", "！", "？", "!", "?", ";", "；", "\n"]
     private static let maxWatchedValueLength = 10000
 
@@ -402,6 +419,7 @@ final class TypingCollector: ObservableObject {
         // 启动即对齐一次当前焦点（启动时不会有 didActivate 事件）
         handleFocusChanged()
         startPolling()
+        installPhysicalInputMonitor()
         HotkeyFileLog.shared.log("collector: started")
     }
 
@@ -422,12 +440,46 @@ final class TypingCollector: ObservableObject {
         }
     }
 
+    /// 物理输入监听（采集开启期间常驻）。滚动/移动不 armed：只认"按下"。
+    /// 鼠标按下也认——中文 IME 候选词常靠点选上屏，点选与上屏间隔是毫秒级。
+    private func installPhysicalInputMonitor() {
+        guard physicalInputMonitor == nil else { return }
+        physicalInputMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.lastPhysicalInputAt = Date()
+            }
+        }
+    }
+
+    /// 新增文本是否来自人（或本应用写回）。机器写入抑制期间只推进 baseline 不进缓冲。
+    private func machineInputSuppressed() -> Bool {
+        let now = Date()
+        let human = now.timeIntervalSince(lastPhysicalInputAt) <= Self.physicalInputGrace
+        let own = now.timeIntervalSince(lastOwnWritebackAt) <= Self.ownWritebackGrace
+        let suppressed = !human && !own
+        if suppressed != suppressingMachineText {
+            suppressingMachineText = suppressed
+            HotkeyFileLog.shared.log(suppressed ? "collector: machine text suppressed (start)" : "collector: machine text suppression ended")
+        }
+        return suppressed
+    }
+
+    /// 本应用写回入口：语音转写 / 译文粘贴前调用，让门控放行自己的输出
+    func noteOwnWriteback() {
+        lastOwnWritebackAt = Date()
+    }
+
     func stop() {
         flushBuffer(reason: "stop")
         silenceTimer?.invalidate()
         silenceTimer = nil
         pollTimer?.invalidate()
         pollTimer = nil
+        if let monitor = physicalInputMonitor {
+            NSEvent.removeMonitor(monitor)
+            physicalInputMonitor = nil
+        }
+        suppressingMachineText = false
         if let token = workspaceToken {
             NSWorkspace.shared.notificationCenter.removeObserver(token)
             workspaceToken = nil
@@ -591,8 +643,12 @@ final class TypingCollector: ObservableObject {
         if committedNS.hasPrefix(baselineNS as String) {
             if committedNS.length > baselineNS.length {
                 let delta = committedNS.substring(from: baselineNS.length)
-                appendDelta(delta)
-                emitCompleteSentences()
+                if machineInputSuppressed() {
+                    // 机器写入（agent 回复/自动填充）：不进缓冲，baseline 照常推进
+                } else {
+                    appendDelta(delta)
+                    emitCompleteSentences()
+                }
             }
         } else if baselineNS.hasPrefix(committedNS as String),
                   buffer.count >= baselineNS.length - committedNS.length {
@@ -605,7 +661,7 @@ final class TypingCollector: ObservableObject {
             // （部分提交时残余拼音经 appendDelta 重新隔离）；缓冲里更早的内容不 flush
             quarantine = ""
             let newSegment = Self.substringAfterCommonPrefix(baselineNS, committedNS)
-            if !newSegment.isEmpty {
+            if !newSegment.isEmpty, !machineInputSuppressed() {
                 appendDelta(newSegment)
                 emitCompleteSentences()
             }

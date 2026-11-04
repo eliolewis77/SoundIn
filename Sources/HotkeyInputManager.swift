@@ -51,6 +51,9 @@ final class HotkeyFileLog: @unchecked Sendable {
             openHandle()
         }
         guard let handle else { return }
+        // 每次写入前重定位到真实末尾：多进程并存（dev + 发布版）时各持陈旧偏移
+        // 互相覆盖，会整行吃掉对方的日志（2026-11-04 实测丢过门控判定行）
+        handle.seekToEndOfFile()
         handle.write(data)
         knownSize += data.count
     }
@@ -1812,6 +1815,8 @@ final class HotkeyInputManager {
         let currentBaseline = pasteboardBaseline
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        // 输入采集的物理输入门控放行自己的写回（转写/译文都是程序写入）
+        TypingCollector.shared.noteOwnWriteback()
         guard sendPasteShortcut() else { return false }
         // 不再固定 sleep 320ms：等待目标应用消费剪贴板，慢应用也能等到粘贴完成再恢复剪贴板
         let delivery = await waitForPasteEffect(expectedText: text)
