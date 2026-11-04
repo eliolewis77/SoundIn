@@ -90,7 +90,16 @@ macOS 会请求**麦克风**权限；为把转写结果输入到光标处，可�
 1. 把 `Info.plist` 里的 `CFBundleShortVersionString` / `CFBundleVersion` 改成新版本号（如 `1.0.11`）
 2. 运行 `./scripts/release.sh`
 
-脚本自动完成：构建 → Developer ID 签名 → 公证（notarize + staple）→ 创建 GitHub Release（自动生成变更说明，附 `SoundIn.app.zip`）→ 生成 appcast 并推送到 `gh-pages`。Sparkle 客户端从 `https://eliolewis77.github.io/SoundIn/appcast.xml` 拉取更新。远端已有同名 tag 时脚本会直接拒绝，防止重复发版。
+脚本构建并公证 App，然后在 GitHub Release 提供两个附件：
+
+- `SoundIn-<版本>.dmg` 用于手动安装。打开 DMG，将 SoundIn 拖到「应用程序」。脚本会验证 DMG 的签名和公证票据，再挂载验证其中的 App。
+- `SoundIn.app.zip` 用于 Sparkle 自动更新。更新清单和 ZIP 会推送到 `gh-pages`，供客户端从 `https://eliolewis77.github.io/SoundIn/appcast.xml` 获取。
+
+远端已有同名 tag 时脚本会直接拒绝，防止重复发版。已有签名并公证的 App 也可以单独打包为 DMG：
+
+```bash
+bash scripts/package-dmg.sh .build-cache/app/SoundIn.app build-release/SoundIn-1.3.1.dmg
+```
 
 > 前置条件（一次性，均已就绪）：钥匙串里的 Developer ID Application 证书、`xcrun notarytool store-credentials` 的公证凭据、登录钥匙串里的 Sparkle EdDSA 私钥。详见 `scripts/release.sh` 头部注释。
 >

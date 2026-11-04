@@ -7,8 +7,8 @@ import Foundation
 
 /// 句子级噪音判定：代码/命令行/URL/碎片不进语料。纯函数，方便后续调整阈值。
 enum TypingFilters {
-    /// 单句长度上限：超长基本是整段粘贴/大文档，不是"高频语句"
-    static let maxSentenceLength = 500
+    /// 限制异常的大文档，同时允许普通多段输入作为一条保存。
+    static let maxEntryLength = 10_000
 
     /// URL / 域名
     private static let urlRegex = try! NSRegularExpression(pattern: #"https?://|www\."#, options: [.caseInsensitive])
@@ -21,7 +21,7 @@ enum TypingFilters {
 
     static func isNoise(_ rawText: String) -> Bool {
         let text = rawText.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard text.count >= 2, text.count <= maxSentenceLength else { return true }
+        guard text.count >= 2, text.count <= maxEntryLength else { return true }
 
         let range = NSRange(text.startIndex..., in: text)
         if urlRegex.firstMatch(in: text, options: [], range: range) != nil { return true }
@@ -313,7 +313,7 @@ final class TypingCollectionStore: ObservableObject {
 
 /// 常驻采集各应用输入框中用户键入的文本：每个前台应用一个 AXObserver（alt-tab-macos
 /// 同款模式，observer 与元素所属 app 绑定），任意时刻只观察一个焦点元素的值变化；
-/// diff 出"本次新增的已提交文本"进缓冲，由句末标点/清空/切焦点/静默四个触发条件切句入库。
+/// 同一输入框内暂存本次输入，清空、切换焦点或停止采集时整段入库。
 /// 中文经拼音上屏后的最终文本天然可见（marked text 段剔除，拼音碎片不进语料）。
 @MainActor
 final class TypingCollector: ObservableObject {
@@ -336,13 +336,11 @@ final class TypingCollector: ObservableObject {
     private var watchedAppName = ""
     /// 上一次"已提交文本"快照：diff 基准，排除未上屏拼音串与既有内容
     private var baseline = ""
+    /// 采集段以首次编辑前的值为基准，不依赖轮询读到每一个拼音中间态。
+    private var captureBaseline: String?
     private var buffer = ""
-    /// IME 组词暂存：VSCode 等 Chromium 应用不暴露 marked text，组词拼音直接进 AXValue。
-    /// 中文 IME 活跃期间的纯字母增量先进隔离区——候选上屏（拼音被中文替换）则丢弃，
-    /// 2.5s 无后续（回车上屏拼音/真的在打英文）则转正入缓冲。
-    private var quarantine = ""
-    private var lastQuarantineAt = Date.distantPast
-    private var silenceTimer: Timer?
+    /// 外部写入隔开了两段人工输入时，保留之前确认过的文字，排除外部写入。
+    private var settledBuffer = ""
     /// 轮询兜底：AX 值变化通知在部分 App 上不可靠（注册成功但不投递/严重延迟），
     /// 0.6s 轮询 watched 元素的值走同一条幂等 diff 路径，保证最终都能采到
     private var pollTimer: Timer?
@@ -354,12 +352,12 @@ final class TypingCollector: ObservableObject {
     /// 全局监听只观察不吞事件（NSEvent 限制），与弹窗关闭监听同一套路。
     private var physicalInputMonitor: Any?
     private var lastPhysicalInputAt = Date.distantPast
+    private var lastInputWasDeletion = false
     /// 本应用自己的写回（语音转写 / 译文经 paste() 粘贴进输入框）：是程序写入但应采集
     private var lastOwnWritebackAt = Date.distantPast
     /// 机器写入抑制中的日志去重：只在进入/退出抑制时各记一条，流式写入不刷屏
     private var suppressingMachineText = false
 
-    private static let silenceFlushInterval: TimeInterval = 5
     private static let pollInterval: TimeInterval = 0.6
     /// 物理按键/按下与随后 AX 值变化的允许间隔。实测人因延迟：打字 <50ms、
     /// IME 候选上屏 ~100ms、终端回显（含 SSH）<500ms，0.8s 已留足余量。
@@ -368,8 +366,7 @@ final class TypingCollector: ObservableObject {
     private static let physicalInputGrace: TimeInterval = 0.8
     /// 自身写回豁免窗口：paste() 合成 ⌘V 后目标应用消费剪贴板最多等 1.5s，留 3s
     private static let ownWritebackGrace: TimeInterval = 3
-    private static let sentenceTerminators: Set<Character> = ["。", "！", "？", "!", "?", ";", "；", "\n"]
-    private static let maxWatchedValueLength = 10000
+    private static let maxWatchedValueLength = TypingFilters.maxEntryLength
 
     /// 命令行/密码管理器/钥匙串：输入即命令或敏感信息，整段排除
     private static let excludedAppBundleIDs: Set<String> = [
@@ -430,12 +427,13 @@ final class TypingCollector: ObservableObject {
         pollTimer = Timer.scheduledTimer(withTimeInterval: Self.pollInterval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.isEnabled, let element = self.watchedElement else { return }
-                let len = self.rawValue(of: element).count
+                guard let value = self.rawValue(of: element) else { return }
+                let len = value.count
                 if len != self.lastPolledValueLen {
                     self.lastPolledValueLen = len
                     HotkeyFileLog.shared.log("collector: poll saw valueLen=\(len)")
                 }
-                self.handleValueChange(element: element)
+                self.handleValueChange(element: element, value: value)
             }
         }
     }
@@ -444,9 +442,13 @@ final class TypingCollector: ObservableObject {
     /// 鼠标按下也认——中文 IME 候选词常靠点选上屏，点选与上屏间隔是毫秒级。
     private func installPhysicalInputMonitor() {
         guard physicalInputMonitor == nil else { return }
-        physicalInputMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
+        physicalInputMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.keyDown, .leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
             MainActor.assumeIsolated {
                 self?.lastPhysicalInputAt = Date()
+                self?.lastInputWasDeletion = event.type == .keyDown && (
+                    event.keyCode == 51 || event.keyCode == 117 ||
+                    (event.modifierFlags.contains(.command) && event.charactersIgnoringModifiers == "x")
+                )
             }
         }
     }
@@ -471,8 +473,6 @@ final class TypingCollector: ObservableObject {
 
     func stop() {
         flushBuffer(reason: "stop")
-        silenceTimer?.invalidate()
-        silenceTimer = nil
         pollTimer?.invalidate()
         pollTimer = nil
         if let monitor = physicalInputMonitor {
@@ -528,8 +528,6 @@ final class TypingCollector: ObservableObject {
 
     private func handleFocusChanged() {
         guard isEnabled else { return }
-        flushBuffer(reason: "focus")
-        silenceTimer?.invalidate()
         // 不能在 AX 通知投递栈内嵌套注册新通知：注册会返回 success 但永远不装配
         // （实测 TextEdit 上值事件从此不投递；启动路径的顶层订阅则一切正常）。
         // 跳出当前 MIG 调用栈，到下一个 main runloop tick 再重订阅。
@@ -541,9 +539,14 @@ final class TypingCollector: ObservableObject {
     /// 对齐到当前前台应用的焦点元素。Electron 类应用首次会拿不到焦点元素，
     /// 激活其无障碍树后延迟重试一次（异步等待，不阻塞主线程）。
     private func resubscribeFocus() {
+        guard isEnabled else { return }
+        let app = NSWorkspace.shared.frontmostApplication
+        let focused = app.flatMap { HotkeyInputManager.focusedAXElement(frontmostPID: $0.processIdentifier) }
+        if let watchedElement, let focused, CFEqual(watchedElement, focused) { return }
+        flushBuffer(reason: "focus")
         unsubscribeValueWatch()
         retryingFocus = false
-        guard let app = NSWorkspace.shared.frontmostApplication else { return }
+        guard let app else { return }
         let pid = app.processIdentifier
         guard let observer = ensureObserver(pid: pid) else { return }
         if !focusSubscribedPids.contains(pid) {
@@ -558,26 +561,24 @@ final class TypingCollector: ObservableObject {
         }
         let bundleID = app.bundleIdentifier
         let appName = app.localizedName ?? bundleID ?? "?"
-        if subscribeValueWatch(pid: pid, bundleID: bundleID, appName: appName, observer: observer) { return }
+        if let focused, subscribeValueWatch(element: focused, pid: pid, bundleID: bundleID, appName: appName, observer: observer) { return }
         guard !retryingFocus else { return }
         retryingFocus = true
         HotkeyInputManager.activateElectronAccessibility(pid: pid)
         Task { [weak self] in
             try? await Task.sleep(nanoseconds: 600_000_000)
             guard let self, self.retryingFocus, self.isEnabled,
+                  self.watchedElement == nil, NSWorkspace.shared.frontmostApplication?.processIdentifier == pid,
                   let observer = self.observers[pid] else { return }
             self.retryingFocus = false
-            _ = self.subscribeValueWatch(pid: pid, bundleID: bundleID, appName: appName, observer: observer)
+            if let focused = HotkeyInputManager.focusedAXElement(frontmostPID: pid) {
+                _ = self.subscribeValueWatch(element: focused, pid: pid, bundleID: bundleID, appName: appName, observer: observer)
+            }
         }
     }
 
     /// 对新焦点元素挂值变化通知。返回 false 表示当前元素不可采集（非输入框/超长/黑名单）。
-    private func subscribeValueWatch(pid: pid_t, bundleID: String?, appName: String, observer: AXObserver) -> Bool {
-        guard let element = HotkeyInputManager.focusedAXElement(frontmostPID: pid) else {
-            HotkeyFileLog.shared.log("collector: subscribe no focused element pid=\(pid)")
-            return false
-        }
-
+    private func subscribeValueWatch(element: AXUIElement, pid: pid_t, bundleID: String?, appName: String, observer: AXObserver) -> Bool {
         // 角色白名单（AXSecureTextField 不在其中）；再显式查一次安全角色作纵深防御，
         // 防止未来白名单扩展时把密码框放进来
         let role = HotkeyInputManager.axRole(of: element)
@@ -592,7 +593,7 @@ final class TypingCollector: ObservableObject {
             }
         }
 
-        let value = rawValue(of: element)
+        guard let value = rawValue(of: element) else { return false }
         guard value.count <= Self.maxWatchedValueLength else {
             // 超长基本是网页正文/文档容器误报为输入框，diff 与存储都不该碰它
             HotkeyFileLog.shared.log("collector: skip oversized element (\(value.count) chars)")
@@ -629,98 +630,66 @@ final class TypingCollector: ObservableObject {
 
     // MARK: - 值变化 → diff → 缓冲
 
-    private func handleValueChange(element: AXUIElement) {
+    private func handleValueChange(element: AXUIElement, value polledValue: String? = nil) {
         guard isEnabled, let watched = watchedElement, CFEqual(element, watched) else { return }
-        // 每次事件重查安全角色：网页密码框可能在同元素上切换显示形态
-        if HotkeyInputManager.axRole(of: element) == "AXSecureTextField" { return }
+        // 每次事件重查安全角色：网页密码框可能在同元素上切换显示形态。
+        guard HotkeyInputManager.axRole(of: element) != "AXSecureTextField",
+              let value = polledValue ?? rawValue(of: element) else { return }
+        let marked = markedRange(of: element)
+        let committed = Self.committedText(value: value, markedRange: marked)
+        defer { baseline = committed }
+        guard committed != baseline else { return }
 
-        let value = rawValue(of: element)
-        let committed = Self.committedText(value: value, markedRange: markedRange(of: element))
-        let baselineNS = baseline as NSString
-        let committedNS = committed as NSString
-        let bufferLenBefore = buffer.count
-
-        if committedNS.hasPrefix(baselineNS as String) {
-            if committedNS.length > baselineNS.length {
-                let delta = committedNS.substring(from: baselineNS.length)
-                if machineInputSuppressed() {
-                    // 机器写入（agent 回复/自动填充）：不进缓冲，baseline 照常推进
-                } else {
-                    appendDelta(delta)
-                    emitCompleteSentences()
-                }
+        if value.isEmpty {
+            // 发送/提交常清空输入框。用户主动删空则丢弃草稿。
+            if lastInputWasDeletion && Date().timeIntervalSince(lastPhysicalInputAt) <= Self.physicalInputGrace {
+                resetCapture()
+            } else {
+                flushBuffer(reason: "clear")
             }
-        } else if baselineNS.hasPrefix(committedNS as String),
-                  buffer.count >= baselineNS.length - committedNS.length {
-            // 尾部回删（打错字）：缓冲同步去掉同样长度的尾巴，修正内容不进语料
-            let removed = baselineNS.length - committedNS.length
-            buffer = String(buffer.dropLast(removed))
-            quarantine = String(quarantine.dropLast(min(removed, quarantine.count)))
-        } else if !quarantine.isEmpty {
-            // 候选词上屏：组词拼音被替换成中文。丢弃隔离区，把新上屏的内容接回缓冲
-            // （部分提交时残余拼音经 appendDelta 重新隔离）；缓冲里更早的内容不 flush
-            quarantine = ""
-            let newSegment = Self.substringAfterCommonPrefix(baselineNS, committedNS)
-            if !newSegment.isEmpty, !machineInputSuppressed() {
-                appendDelta(newSegment)
-                emitCompleteSentences()
-            }
-        } else {
-            // 中间编辑/整体替换：收走已缓冲内容后重置基准，本次差异不采集
-            flushBuffer(reason: "edit")
-        }
-        baseline = committed
-        // 只在缓冲真的变化时重排静默 flush：轮询每 0.6s 都会走到这里，
-        // 无条件重排会让空闲轮询把 flush 永远推后、永不触发
-        if buffer.count != bufferLenBefore {
-            scheduleSilenceFlush()
-        }
-        promoteStaleQuarantine()
-    }
-
-    /// 增量分流：中文 IME 活跃时的纯字母增量疑似组词拼音，进隔离区观察；
-    /// 其余（中文上屏、标点、ABC 输入源的英文）直接进缓冲
-    private func appendDelta(_ delta: String) {
-        if Self.isPinyinLike(delta), Self.chineseIMEActive() {
-            quarantine += delta
-            lastQuarantineAt = Date()
             return
         }
-        buffer += quarantine
-        quarantine = ""
-        buffer += delta
+        if machineInputSuppressed() {
+            settledBuffer += buffer
+            buffer = ""
+            captureBaseline = nil
+            return
+        }
+
+        let initial = captureBaseline ?? baseline
+        captureBaseline = initial
+        let changed = Self.changedText(from: initial, to: committed)
+        buffer = marked == nil && Self.chineseIMEActive()
+            ? Self.removingUnconfirmedPinyinTail(from: changed)
+            : changed
     }
 
-    /// 隔离区超时转正：2.5s 内没有候选上屏的替换事件，说明用户是真的要这些字符
-    /// （回车上屏拼音、或在中文 IME 下打英文）。由轮询 tick 周期调用。
-    private func promoteStaleQuarantine() {
-        guard !quarantine.isEmpty else { return }
-        guard Date().timeIntervalSince(lastQuarantineAt) > 2.5 else { return }
-        let before = buffer.count
-        buffer += quarantine
-        quarantine = ""
-        emitCompleteSentences()
-        if buffer.count != before {
-            scheduleSilenceFlush()
-        }
+    /// 用最新快照替换草稿。两端未改动的旧内容都不属于本次输入。
+    nonisolated private static func changedText(from initial: String, to current: String) -> String {
+        let prefixCount = zip(initial, current).prefix { $0.0 == $0.1 }.count
+        let oldTail = initial.dropFirst(prefixCount)
+        let newTail = current.dropFirst(prefixCount)
+        let suffixCount = zip(oldTail.reversed(), newTail.reversed()).prefix { $0.0 == $0.1 }.count
+        return String(newTail.dropLast(suffixCount))
     }
 
-    /// 缓冲中的完整句（句末标点/换行结尾）立即切出入库，残句留给 flush 触发条件
-    private func emitCompleteSentences() {
-        while let idx = buffer.firstIndex(where: { Self.sentenceTerminators.contains($0) }) {
-            let segment = String(buffer[...idx])
-            buffer = String(buffer[buffer.index(after: idx)...])
-            collect(segment)
-        }
+    nonisolated private static func removingUnconfirmedPinyinTail(from text: String) -> String {
+        let tail = text.reversed().prefix(while: Self.isPinyinCharacter)
+        guard tail.contains(where: { $0.isASCII && $0.isLetter }) else { return text }
+        return String(text.dropLast(tail.count))
+    }
+
+    private func resetCapture() {
+        captureBaseline = nil
+        buffer = ""
+        settledBuffer = ""
     }
 
     private func flushBuffer(reason: String) {
-        guard !buffer.isEmpty || !quarantine.isEmpty else { return }
-        emitCompleteSentences()
-        let remainder = buffer + quarantine
-        buffer = ""
-        quarantine = ""
-        collect(remainder)
+        let text = settledBuffer + buffer
+        resetCapture()
+        guard !text.isEmpty else { return }
+        collect(text)
         HotkeyFileLog.shared.log("collector: flushed (\(reason))")
     }
 
@@ -731,24 +700,15 @@ final class TypingCollector: ObservableObject {
             HotkeyFileLog.shared.log("collector: noise dropped (\(text.count) chars)")
             return
         }
-        TypingCollectionStore.shared.record(text: String(text.prefix(TypingFilters.maxSentenceLength)), app: watchedAppName)
-    }
-
-    private func scheduleSilenceFlush() {
-        silenceTimer?.invalidate()
-        silenceTimer = Timer.scheduledTimer(withTimeInterval: Self.silenceFlushInterval, repeats: false) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.flushBuffer(reason: "silence")
-            }
-        }
+        TypingCollectionStore.shared.record(text: text, app: watchedAppName)
     }
 
     // MARK: - AX 读取辅助
 
-    private func rawValue(of element: AXUIElement) -> String {
+    private func rawValue(of element: AXUIElement) -> String? {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(element, kAXValueAttribute as CFString, &value) == .success,
-              let text = value as? String else { return "" }
+              let text = value as? String else { return nil }
         return text
     }
 
@@ -774,42 +734,21 @@ final class TypingCollector: ObservableObject {
         return ns.replacingCharacters(in: NSRange(location: location, length: length), with: "")
     }
 
-    /// b 相对 a 新增的尾部内容（去掉公共前缀，UTF-16 对齐）
-    nonisolated private static func substringAfterCommonPrefix(_ a: NSString, _ b: NSString) -> String {
-        var i = 0
-        let max = min(a.length, b.length)
-        while i < max, a.character(at: i) == b.character(at: i) { i += 1 }
-        return b.substring(from: i)
+    nonisolated private static func isPinyinCharacter(_ character: Character) -> Bool {
+        character == " " || character == "'" ||
+            (character.isASCII && character.isLetter)
     }
 
-    /// 疑似组词拼音：全部由字母（及组词分隔符空格/'）组成且至少含一个字母。
-    /// 中文、数字、标点、大写开头的英文都走正常路径。
-    nonisolated private static func isPinyinLike(_ delta: String) -> Bool {
-        var hasLetter = false
-        for ch in delta.unicodeScalars {
-            if ch == " " || ch == "'" { continue }
-            guard (ch >= "a" && ch <= "z") || (ch >= "A" && ch <= "Z") else { return false }
-            hasLetter = true
-        }
-        return hasLetter
-    }
-
-    /// 当前选中输入源是否为输入法（非 ABC 键盘布局）。
-    /// 只在增量疑似拼音时才调用，TIS 查询频率与组词键入同频，开销可忽略。
+    /// 直接查询当前输入源，兼容输入源 ID 不含 inputmethod 的第三方中文输入法。
     nonisolated private static func chineseIMEActive() -> Bool {
-        let filter = [kTISPropertyInputSourceIsSelected as String: kCFBooleanTrue] as CFDictionary
-        guard let list = TISCreateInputSourceList(filter, false)?.takeRetainedValue() as? [TISInputSource] else {
-            return false
+        guard let source = TISCopyCurrentKeyboardInputSource()?.takeRetainedValue() else { return false }
+        if let raw = TISGetInputSourceProperty(source, kTISPropertyInputSourceLanguages),
+           let languages = Unmanaged<CFArray>.fromOpaque(raw).takeUnretainedValue() as? [String],
+           languages.contains(where: { $0 == "zh" || $0.hasPrefix("zh-") }) {
+            return true
         }
-        for src in list {
-            // TISGetInputSourceProperty 是 Get 规则：返回引用不保留，
-            // 用 takeRetainedValue 会过度释放 TIS 缓存的属性对象，后续 retain 直接崩
-            guard let raw = TISGetInputSourceProperty(src, kTISPropertyInputSourceID as CFString) else { continue }
-            let cf = Unmanaged<CFTypeRef>.fromOpaque(raw).takeUnretainedValue()
-            if let id = cf as? String, id.contains("inputmethod") {
-                return true
-            }
-        }
-        return false
+        guard let raw = TISGetInputSourceProperty(source, kTISPropertyInputSourceID) else { return false }
+        let identifier = Unmanaged<CFString>.fromOpaque(raw).takeUnretainedValue() as String
+        return identifier.localizedCaseInsensitiveContains("inputmethod")
     }
 }

@@ -1,6 +1,6 @@
 #!/bin/bash
 # SoundIn 本地发版流水线：
-#   构建(Developer ID 签名) → 公证 → staple → GitHub Release → appcast → gh-pages
+#   构建与公证 App → ZIP 更新包 + 签名公证 DMG → GitHub Release → gh-pages
 #
 # 背景：CI（.github/workflows/release.yml）没有开发者证书，产物是 ad-hoc 签名，
 # 1.0.2 曾因此启动即崩（Hardened Runtime 库校验拒绝 ad-hoc 的内嵌 Sparkle 框架）。
@@ -59,20 +59,27 @@ rm "$STAGE/app-for-notary.zip"
 # staple 后重新打包（zip 里必须是 stapled 版本）
 ditto -c -k --keepParent "$APP" "$STAGE/$APP_NAME.app.zip"
 
+# 先生成仅使用 ZIP 的 Sparkle 更新清单，再在同目录生成手动安装的 DMG。
+echo "==> 生成 appcast"
+(cd "$STAGE" && "$SPARKLE_BIN/generate_appcast" .)
+grep -q "shortVersionString>$VERSION<" "$STAGE/appcast.xml" || {
+  echo "error: appcast 里没有 $VERSION 条目，中止发布" >&2; exit 1; }
+
+DMG="$STAGE/$APP_NAME-$VERSION.dmg"
+echo "==> 签名、公证并验证 DMG"
+SIGN_IDENTITY="$IDENTITY" NOTARY_PROFILE="$NOTARY_PROFILE" \
+  bash scripts/package-dmg.sh "$APP" "$DMG"
+
 # ── 3. GitHub Release（tag 由 release create 顺带打出）──
 echo "==> 创建 Release v$VERSION"
 gh release create "v$VERSION" \
   --title "v$VERSION" \
   --generate-notes \
-  "$STAGE/$APP_NAME.app.zip"
+  "$STAGE/$APP_NAME.app.zip" "$DMG"
 
 # ── 4. appcast + gh-pages ──
 # generate_appcast 不带 --ed-key-file 时默认用钥匙串里的 Sparkle 私钥；
 # enclosure URL 会按 zip 内 app 的 SUFeedURL 自动推导，和 CI 产物一致。
-echo "==> 生成 appcast"
-(cd "$STAGE" && "$SPARKLE_BIN/generate_appcast" .)
-grep -q "shortVersionString>$VERSION<" "$STAGE/appcast.xml" || {
-  echo "error: appcast 里没有 $VERSION 条目，中止推送" >&2; exit 1; }
 
 echo "==> 推送 gh-pages"
 REPO_DIR="$PWD"
