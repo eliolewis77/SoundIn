@@ -380,7 +380,7 @@ private struct TranslatePopupView: View {
         let canCopy: Bool
         if case .success = model.state { canCopy = true } else { canCopy = false }
         return ResultPanelHeader(title: "翻译", systemImage: "character.book.closed.fill",
-                                 onCopy: canCopy ? onCopy : nil, onClose: onClose)
+                                 onCopy: canCopy ? onCopy : nil, showsCopyText: false, onClose: onClose)
     }
 
     @ViewBuilder

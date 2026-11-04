@@ -155,8 +155,10 @@ final class ScreenshotOverlay: NSObject, NSTextViewDelegate {
     /// 选区宽或高小于此值视为单击（取消），不进工具栏
     static let minSelectionSide: CGFloat = 4
     static let dimAlpha: CGFloat = 0.28
-    /// 标注线宽（逻辑点）
+    /// 标注线宽（逻辑点；画笔用）。矩形标注单独一档更细的框线
     static let annotationLineWidth: CGFloat = 3
+    /// 矩形标注边线宽（逻辑点）
+    static let annotationRectLineWidth: CGFloat = 1.5
     /// 马赛克块边长（逻辑点）：跨分辨率视觉一致
     static let mosaicBlockPoint: CGFloat = 12
     /// 标注色板：下标 0 是红色（默认选中），其余为主题蓝/黄/绿
@@ -1744,7 +1746,7 @@ private func renderAnnotation(_ annotation: Annotation, in ctx: CGContext,
         ctx.strokePath()
     case .rect:
         ctx.setStrokeColor(strokeColor)
-        ctx.setLineWidth(width)
+        ctx.setLineWidth(ScreenshotOverlay.annotationRectLineWidth)
         ctx.stroke(annotation.rect)
     case .mosaic:
         guard let pixelated else { return }
@@ -1888,13 +1890,13 @@ private final class OverlayContentView: NSView {
             ctx.stroke(editing.draftBorder)
             ctx.restoreGState()
         }
-        // ④ 选区边框：主题蓝 1.5pt + 外圈暗描边
+        // ④ 选区边框：主题蓝 1pt + 外圈暗描边
         if !sel.isEmpty {
             let path = NSBezierPath(rect: sel)
-            path.lineWidth = 3
+            path.lineWidth = 2
             NSColor.black.withAlphaComponent(0.5).setStroke()
             path.stroke()
-            path.lineWidth = 1.5
+            path.lineWidth = 1
             NSColor.controlAccentColor.setStroke()
             path.stroke()
             // ④½ 工具栏期（无激活工具）画 8 个调整手柄，提示边/角可拖拽
